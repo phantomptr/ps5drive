@@ -39,6 +39,11 @@ static pid_t g_child_pid = -1;
 static int g_pid_tracking_enabled = 1;
 static runtime_cfg_t g_cfg;
 
+typedef struct health_info {
+    pid_t pid;
+    pid_t ppid;
+} health_info_t;
+
 static int parse_env_int(const char *name, int fallback) {
     const char *raw = getenv(name);
     if (!raw || !*raw) return fallback;
@@ -98,9 +103,10 @@ static int write_pid_file(const char *path, pid_t pid) {
     return 0;
 }
 
-static pid_t parse_pid_from_text(const char *text) {
-    if (!text) return -1;
-    const char *key = "\"pid\":";
+static pid_t parse_pid_field(const char *text, const char *field) {
+    if (!text || !field || !*field) return -1;
+    char key[64];
+    if (snprintf(key, sizeof(key), "\"%s\":", field) >= (int)sizeof(key)) return -1;
     const char *p = strstr(text, key);
     if (!p) return -1;
     p += strlen(key);
@@ -111,7 +117,11 @@ static pid_t parse_pid_from_text(const char *text) {
     return (pid_t)val;
 }
 
-static pid_t query_pid_from_health_port(int port) {
+static int query_health_info_from_port(int port, health_info_t *out) {
+    if (!out) return -1;
+    out->pid = -1;
+    out->ppid = -1;
+
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
 
@@ -155,10 +165,17 @@ static pid_t query_pid_from_health_port(int port) {
     }
     buf[used] = '\0';
     close(fd);
-    return parse_pid_from_text(buf);
+
+    out->pid = parse_pid_field(buf, "pid");
+    out->ppid = parse_pid_field(buf, "ppid");
+    return out->pid > 0 ? 0 : -1;
 }
 
-static pid_t query_pid_from_health(void) {
+static int query_health_info(health_info_t *out) {
+    if (!out) return -1;
+    out->pid = -1;
+    out->ppid = -1;
+
     int ports[] = {
         g_cfg.api_port,
         g_cfg.web_port,
@@ -169,10 +186,62 @@ static pid_t query_pid_from_health(void) {
     };
     for (size_t i = 0; i < sizeof(ports) / sizeof(ports[0]); ++i) {
         if (ports[i] <= 0) continue;
-        pid_t pid = query_pid_from_health_port(ports[i]);
-        if (pid > 0) return pid;
+        if (query_health_info_from_port(ports[i], out) == 0 && out->pid > 0) return 0;
     }
     return -1;
+}
+
+static int request_stop_on_port(int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    const char *req =
+        "POST /api/stop HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Connection: close\r\n"
+        "Content-Length: 0\r\n"
+        "\r\n";
+    if (send(fd, req, strlen(req), 0) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    char sink[256];
+    (void)recv(fd, sink, sizeof(sink), 0);
+    close(fd);
+    return 0;
+}
+
+static void request_stop_existing_instances(void) {
+    int ports[] = {
+        g_cfg.api_port,
+        g_cfg.web_port,
+        PS5DRIVE_API_PORT,
+        PS5DRIVE_WEB_PORT,
+        8904,
+        8903
+    };
+    for (size_t i = 0; i < sizeof(ports) / sizeof(ports[0]); ++i) {
+        if (ports[i] <= 0) continue;
+        (void)request_stop_on_port(ports[i]);
+    }
+    usleep(250 * 1000);
 }
 
 static int is_process_alive(pid_t pid) {
@@ -228,6 +297,8 @@ static void install_parent_signals(void) {
 }
 
 static void kill_previous_instances(void) {
+    request_stop_existing_instances();
+
     pid_t old_parent = -1;
     pid_t old_server = -1;
 
@@ -238,9 +309,12 @@ static void kill_previous_instances(void) {
 
     /* Fallback when pid files are missing/unusable: ask existing API health for PID. */
     if (old_parent <= 0 || old_server <= 0) {
-        pid_t health_pid = query_pid_from_health();
-        if (old_parent <= 0) old_parent = health_pid;
-        if (old_server <= 0) old_server = health_pid;
+        health_info_t info;
+        if (query_health_info(&info) == 0) {
+            if (old_server <= 0) old_server = info.pid;
+            if (old_parent <= 0) old_parent = info.ppid;
+            if (old_parent <= 0) old_parent = info.pid;
+        }
     }
 
     if (old_parent > 0 && old_parent != g_self_pid) {

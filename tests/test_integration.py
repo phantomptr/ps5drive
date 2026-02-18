@@ -126,6 +126,8 @@ class Ps5DriveIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         payload = json.loads(body.decode("utf-8"))
         self.assertTrue(payload["ok"])
+        self.assertGreater(int(payload.get("pid", 0)), 0)
+        self.assertGreater(int(payload.get("ppid", 0)), 0)
         self.assertEqual(payload["api_port"], self.api_port)
         self.assertEqual(payload["web_port"], self.web_port)
         self.assertEqual(payload["debug_port"], self.debug_port)
@@ -165,6 +167,7 @@ class Ps5DriveIntegrationTests(unittest.TestCase):
         self.assertIn("id=\"chmodBtn\">CHMOD 777", text)
         self.assertIn("Debug Port:", text)
         self.assertIn("id=\"moveInput\"", text)
+        self.assertIn("id=\"loadMoreBtn\"", text)
         self.assertIn("id=\"uploadStopBtn\"", text)
         self.assertIn("Activity Log", text)
         self.assertNotIn("Status: Online", text)
@@ -195,6 +198,37 @@ class Ps5DriveIntegrationTests(unittest.TestCase):
         payload = json.loads(body.decode("utf-8"))
         names = [entry["name"] for entry in payload["entries"]]
         self.assertIn("list", names)
+
+    def test_list_pagination(self) -> None:
+        folder = "/cases/paginate"
+        status, _, _ = self.api_request("POST", f"/api/mkdir?path={self._q(folder)}")
+        self.assertEqual(status, 200)
+
+        for i in range(23):
+            file_path = f"{folder}/f{i:03d}.txt"
+            blob = f"file-{i}\n".encode("utf-8")
+            status, _, _ = self.api_request(
+                "PUT",
+                f"/api/upload?path={self._q(file_path)}",
+                body=blob,
+                headers={"Content-Length": str(len(blob)), "Content-Type": "application/octet-stream"},
+            )
+            self.assertEqual(status, 200)
+
+        status, _, body = self.api_request("GET", f"/api/list?path={self._q(folder)}&limit=10&offset=0")
+        self.assertEqual(status, 200)
+        page1 = json.loads(body.decode("utf-8"))
+        self.assertEqual(int(page1["limit"]), 10)
+        self.assertLessEqual(len(page1["entries"]), 10)
+        self.assertTrue(bool(page1["has_more"]))
+        next_offset = int(page1["next_offset"])
+        self.assertGreaterEqual(next_offset, 10)
+
+        status, _, body = self.api_request("GET", f"/api/list?path={self._q(folder)}&limit=10&offset={next_offset}")
+        self.assertEqual(status, 200)
+        page2 = json.loads(body.decode("utf-8"))
+        self.assertEqual(int(page2["offset"]), next_offset)
+        self.assertLessEqual(len(page2["entries"]), 10)
 
     def test_upload_and_download_file(self) -> None:
         target = "/cases/upload/hello.txt"

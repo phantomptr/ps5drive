@@ -142,6 +142,7 @@ class Ps5DriveRemoteTests(unittest.TestCase):
         self.assertIn("id=\"chmodBtn\">CHMOD 777", text)
         self.assertIn("Debug Port:", text)
         self.assertIn("id=\"moveInput\"", text)
+        self.assertIn("id=\"loadMoreBtn\"", text)
         self.assertIn("id=\"uploadStopBtn\"", text)
         self.assertIn("Activity Log", text)
         self.assertNotIn("Status: Online", text)
@@ -151,6 +152,8 @@ class Ps5DriveRemoteTests(unittest.TestCase):
         self.assertEqual(status, 200)
         health = json.loads(body.decode("utf-8"))
         self.assertTrue(health["ok"])
+        self.assertGreater(int(health.get("pid", 0)), 0)
+        self.assertGreater(int(health.get("ppid", 0)), 0)
         self.assertEqual(int(health["api_port"]), self.api_port)
         self.assertEqual(int(health["web_port"]), self.web_port)
         self.assertEqual(int(health["debug_port"]), self.debug_port)
@@ -240,6 +243,37 @@ class Ps5DriveRemoteTests(unittest.TestCase):
 
         status, _, _ = self._api_request("DELETE", f"/api/delete?path={self._q(file_path)}")
         self.assertEqual(status, 200)
+
+    def test_remote_list_pagination(self) -> None:
+        folder = f"{self.case_root}/paginate"
+        status, _, _ = self._api_request("POST", f"/api/mkdir?path={self._q(folder)}")
+        self.assertEqual(status, 200)
+
+        for i in range(21):
+            file_path = f"{folder}/f{i:03d}.txt"
+            blob = f"remote-file-{i}\n".encode("utf-8")
+            status, _, _ = self._api_request(
+                "PUT",
+                f"/api/upload?path={self._q(file_path)}",
+                body=blob,
+                headers={"Content-Length": str(len(blob)), "Content-Type": "application/octet-stream"},
+            )
+            self.assertEqual(status, 200)
+
+        status, _, body = self._api_request("GET", f"/api/list?path={self._q(folder)}&limit=8&offset=0")
+        self.assertEqual(status, 200)
+        page1 = json.loads(body.decode("utf-8"))
+        self.assertEqual(int(page1["limit"]), 8)
+        self.assertLessEqual(len(page1["entries"]), 8)
+        self.assertTrue(bool(page1["has_more"]))
+        next_offset = int(page1["next_offset"])
+        self.assertGreaterEqual(next_offset, 8)
+
+        status, _, body = self._api_request("GET", f"/api/list?path={self._q(folder)}&limit=8&offset={next_offset}")
+        self.assertEqual(status, 200)
+        page2 = json.loads(body.decode("utf-8"))
+        self.assertEqual(int(page2["offset"]), next_offset)
+        self.assertLessEqual(len(page2["entries"]), 8)
 
     def test_remote_move_into_existing_directory_keeps_name(self) -> None:
         src = f"{self.case_root}/move_src.txt"
