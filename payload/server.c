@@ -49,6 +49,8 @@
 #define PS5DRIVE_GAMES_SCAN_MAX_DEPTH 16
 #define PS5DRIVE_GAMES_SCAN_DEFAULT_MAX_DIRS 8000
 #define PS5DRIVE_GAMES_SCAN_MAX_DIRS 50000
+#define PS5DRIVE_UPLOAD_OWNER_MAX 96
+#define PS5DRIVE_UPLOAD_LOCK_STALE_SEC 120
 #if defined(MSG_NOSIGNAL)
 #define PS5DRIVE_SEND_FLAGS MSG_NOSIGNAL
 #else
@@ -69,6 +71,11 @@ typedef struct server_ctx {
     char auth_username[128];
     char auth_password[128];
     int active_clients;
+    int upload_lock_busy;
+    time_t upload_lock_started_at;
+    time_t upload_lock_last_seen_at;
+    char upload_lock_owner[PS5DRIVE_UPLOAD_OWNER_MAX];
+    char upload_lock_path[PATH_MAX];
     int web_listener_fd;
     int api_listener_fd;
     int debug_listener_fd;
@@ -517,6 +524,48 @@ static const char *security_mode_name(const server_ctx_t *ctx) {
     return auth_is_enabled(ctx) ? "secure" : "unsecure";
 }
 
+static void upload_lock_reset(server_ctx_t *ctx) {
+    if (!ctx) return;
+    ctx->upload_lock_busy = 0;
+    ctx->upload_lock_started_at = 0;
+    ctx->upload_lock_last_seen_at = 0;
+    ctx->upload_lock_owner[0] = '\0';
+    ctx->upload_lock_path[0] = '\0';
+}
+
+static void upload_lock_maybe_expire(server_ctx_t *ctx) {
+    if (!ctx || !ctx->upload_lock_busy) return;
+    time_t now = time(NULL);
+    if (now <= 0) return;
+    if (ctx->upload_lock_last_seen_at <= 0) {
+        upload_lock_reset(ctx);
+        return;
+    }
+    if ((now - ctx->upload_lock_last_seen_at) > PS5DRIVE_UPLOAD_LOCK_STALE_SEC) {
+        upload_lock_reset(ctx);
+    }
+}
+
+static int upload_lock_same_owner(server_ctx_t *ctx, const char *owner) {
+    if (!ctx || !ctx->upload_lock_busy || !owner || owner[0] == '\0') return 0;
+    return strcmp(ctx->upload_lock_owner, owner) == 0;
+}
+
+static void upload_lock_set(server_ctx_t *ctx, const char *owner, const char *virt_path) {
+    if (!ctx || !owner || owner[0] == '\0') return;
+    time_t now = time(NULL);
+    int was_busy = ctx->upload_lock_busy;
+    if (!was_busy) ctx->upload_lock_started_at = now;
+    ctx->upload_lock_busy = 1;
+    ctx->upload_lock_last_seen_at = now;
+    snprintf(ctx->upload_lock_owner, sizeof(ctx->upload_lock_owner), "%s", owner);
+    if (virt_path && virt_path[0] != '\0') {
+        snprintf(ctx->upload_lock_path, sizeof(ctx->upload_lock_path), "%s", virt_path);
+    } else if (!was_busy) {
+        ctx->upload_lock_path[0] = '\0';
+    }
+}
+
 static int base64_value(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return 26 + (c - 'a');
@@ -712,6 +761,66 @@ static int strbuf_append_json_escaped(strbuf_t *sb, const char *src) {
         }
     }
     return 0;
+}
+
+static int strbuf_append_upload_lock_fields(strbuf_t *sb, server_ctx_t *ctx) {
+    if (!sb || !ctx) return -1;
+    upload_lock_maybe_expire(ctx);
+    int rc = 0;
+    rc |= strbuf_append(sb, "\"upload_lock_busy\":");
+    rc |= strbuf_append(sb, ctx->upload_lock_busy ? "true" : "false");
+    rc |= strbuf_append(sb, ",\"upload_lock_owner\":\"");
+    rc |= strbuf_append_json_escaped(sb, ctx->upload_lock_busy ? ctx->upload_lock_owner : "");
+    rc |= strbuf_append(sb, "\",\"upload_lock_path\":\"");
+    rc |= strbuf_append_json_escaped(sb, ctx->upload_lock_busy ? ctx->upload_lock_path : "");
+    rc |= strbuf_append(sb, "\",\"upload_lock_started_at\":");
+    rc |= strbuf_appendf(sb, "%lld", (long long)(ctx->upload_lock_busy ? ctx->upload_lock_started_at : 0));
+    rc |= strbuf_append(sb, ",\"upload_lock_last_seen_at\":");
+    rc |= strbuf_appendf(sb, "%lld", (long long)(ctx->upload_lock_busy ? ctx->upload_lock_last_seen_at : 0));
+    return rc;
+}
+
+static int send_upload_lock_status(server_ctx_t *ctx, int client_fd, int status_code, const char *action,
+                                   int acquired, int released) {
+    if (!ctx) return send_json_error(client_fd, 500, "invalid server context");
+    strbuf_t sb;
+    if (strbuf_init(&sb, 256) != 0) return send_json_error(client_fd, 500, "oom");
+    int rc = 0;
+    rc |= strbuf_append(&sb, "{\"ok\":true");
+    if (action && action[0] != '\0') {
+        rc |= strbuf_append(&sb, ",\"action\":\"");
+        rc |= strbuf_append_json_escaped(&sb, action);
+        rc |= strbuf_append(&sb, "\"");
+    }
+    rc |= strbuf_appendf(&sb, ",\"acquired\":%s,\"released\":%s,",
+                         acquired ? "true" : "false",
+                         released ? "true" : "false");
+    rc |= strbuf_append_upload_lock_fields(&sb, ctx);
+    rc |= strbuf_append(&sb, "}");
+    if (rc != 0) {
+        strbuf_free(&sb);
+        return send_json_error(client_fd, 500, "oom");
+    }
+    rc = send_json_response(client_fd, status_code, sb.data);
+    strbuf_free(&sb);
+    return rc;
+}
+
+static int send_upload_lock_busy_error(server_ctx_t *ctx, int client_fd) {
+    if (!ctx) return send_json_error(client_fd, 423, "upload lock busy");
+    strbuf_t sb;
+    if (strbuf_init(&sb, 256) != 0) return send_json_error(client_fd, 500, "oom");
+    int rc = 0;
+    rc |= strbuf_append(&sb, "{\"ok\":false,\"error\":\"upload lock busy\",");
+    rc |= strbuf_append_upload_lock_fields(&sb, ctx);
+    rc |= strbuf_append(&sb, "}");
+    if (rc != 0) {
+        strbuf_free(&sb);
+        return send_json_error(client_fd, 500, "oom");
+    }
+    rc = send_json_response(client_fd, 423, sb.data);
+    strbuf_free(&sb);
+    return rc;
 }
 
 static const char *listener_kind_name(listener_kind_t kind) {
@@ -2001,8 +2110,62 @@ static int handle_api_games_cover(server_ctx_t *ctx, int client_fd, const http_r
     return stream_file_inline(client_fd, cover_path, mime_type_from_path(cover_path));
 }
 
+static int handle_api_upload_state(server_ctx_t *ctx, int client_fd) {
+    return send_upload_lock_status(ctx, client_fd, 200, "state", 0, 0);
+}
+
+static int handle_api_upload_lock(server_ctx_t *ctx, int client_fd, const http_request_t *req) {
+    if (!ctx || !req) return send_json_error(client_fd, 400, "missing request");
+
+    char action[32];
+    action[0] = '\0';
+    if (query_get_param(req->query, "action", action, sizeof(action)) != 0 || action[0] == '\0') {
+        return send_json_error(client_fd, 400, "missing action");
+    }
+
+    char owner[PS5DRIVE_UPLOAD_OWNER_MAX];
+    owner[0] = '\0';
+    if (query_get_param(req->query, "owner", owner, sizeof(owner)) != 0 || owner[0] == '\0') {
+        return send_json_error(client_fd, 400, "missing owner");
+    }
+
+    char virt[PATH_MAX];
+    virt[0] = '\0';
+    char requested[PATH_MAX];
+    requested[0] = '\0';
+    if (query_get_param(req->query, "path", requested, sizeof(requested)) == 0 && requested[0] != '\0') {
+        if (sanitize_virtual_path(requested, virt, sizeof(virt)) != 0) {
+            return send_json_error(client_fd, 400, "invalid path");
+        }
+    }
+
+    upload_lock_maybe_expire(ctx);
+    if (strcmp(action, "acquire") == 0) {
+        if (ctx->upload_lock_busy && !upload_lock_same_owner(ctx, owner)) {
+            return send_upload_lock_status(ctx, client_fd, 200, "acquire", 0, 0);
+        }
+        upload_lock_set(ctx, owner, virt);
+        return send_upload_lock_status(ctx, client_fd, 200, "acquire", 1, 0);
+    }
+
+    if (strcmp(action, "release") == 0) {
+        int released = 0;
+        if (ctx->upload_lock_busy && upload_lock_same_owner(ctx, owner)) {
+            released = 1;
+            upload_lock_reset(ctx);
+        }
+        return send_upload_lock_status(ctx, client_fd, 200, "release", 0, released);
+    }
+
+    return send_json_error(client_fd, 400, "invalid action");
+}
+
 static int handle_api_upload(server_ctx_t *ctx, int client_fd, const http_request_t *req) {
     if (req->content_length < 0) return send_json_error(client_fd, 411, "content-length required");
+
+    char owner[PS5DRIVE_UPLOAD_OWNER_MAX];
+    owner[0] = '\0';
+    if (query_get_param(req->query, "owner", owner, sizeof(owner)) != 0) owner[0] = '\0';
 
     char requested[PATH_MAX];
     if (query_get_param(req->query, "path", requested, sizeof(requested)) != 0) return send_json_error(client_fd, 400, "missing path");
@@ -2010,6 +2173,16 @@ static int handle_api_upload(server_ctx_t *ctx, int client_fd, const http_reques
     char virt[PATH_MAX];
     if (sanitize_virtual_path(requested, virt, sizeof(virt)) != 0 || strcmp(virt, "/") == 0) {
         return send_json_error(client_fd, 400, "invalid upload path");
+    }
+
+    upload_lock_maybe_expire(ctx);
+    if (owner[0] != '\0') {
+        if (ctx->upload_lock_busy && !upload_lock_same_owner(ctx, owner)) {
+            return send_upload_lock_busy_error(ctx, client_fd);
+        }
+        upload_lock_set(ctx, owner, virt);
+    } else if (ctx->upload_lock_busy) {
+        return send_upload_lock_busy_error(ctx, client_fd);
     }
 
     char full[PATH_MAX];
@@ -2324,12 +2497,14 @@ static int handle_api_health(server_ctx_t *ctx, int client_fd) {
     rc |= strbuf_append_json_escaped(&sb, ctx->cfg.version ? ctx->cfg.version : "dev");
     rc |= strbuf_append(&sb, "\",\"root\":\"");
     rc |= strbuf_append_json_escaped(&sb, ctx->root_abs);
-    rc |= strbuf_appendf(&sb, "\",\"web_port\":%d,\"api_port\":%d,\"debug_port\":%d,\"debug_enabled\":%s,\"active_clients\":%d,\"security_mode\":\"%s\",\"auth_enabled\":%s}",
+    rc |= strbuf_appendf(&sb, "\",\"web_port\":%d,\"api_port\":%d,\"debug_port\":%d,\"debug_enabled\":%s,\"active_clients\":%d,\"security_mode\":\"%s\",\"auth_enabled\":%s,",
                          ctx->cfg.web_port, ctx->cfg.api_port, ctx->cfg.debug_port,
                          ctx->debug_enabled ? "true" : "false",
                          ctx->active_clients,
                          security_mode_name(ctx),
                          auth_is_enabled(ctx) ? "true" : "false");
+    rc |= strbuf_append_upload_lock_fields(&sb, ctx);
+    rc |= strbuf_append(&sb, "}");
     if (rc != 0) {
         strbuf_free(&sb);
         return send_json_error(client_fd, 500, "oom");
@@ -2655,7 +2830,11 @@ static int serve_web_index(server_ctx_t *ctx, int client_fd) {
                         "const RESET_PASS_HEADER='" PS5DRIVE_RESET_PASS_HEADER "';"
                         "const THEME_KEY=BRAND_ID+'_theme';"
                         "const LANG_KEY=BRAND_ID+'_lang';"
-                        "const state={path:'/',entries:[],selected:'',pathHistory:[],pathHistoryIndex:-1,queueFiles:[],queueBytes:0,queueTopItems:[],queuePreparing:false,queuePreparedCount:0,queuePrepToken:0,uploading:false,cancelUpload:false,currentXhr:null,selectedBusy:false,listOffset:0,listLimit:500,hasMore:false,listLoadingMore:false,uploadUiTs:0,uploadUiPct:-1,uploadUiMsg:'',securityMode:'unsecure',overwriteAll:true};"
+                        "const UPLOAD_WARN_FILE_COUNT=20000;"
+                        "const UPLOAD_BLOCK_FILE_COUNT=0;"
+                        "const UPLOAD_WARN_TOTAL_BYTES=40*1024*1024*1024;"
+                        "const UPLOAD_OWNER='u'+Date.now().toString(36)+Math.random().toString(36).slice(2,10);"
+                        "const state={path:'/',entries:[],selected:'',pathHistory:[],pathHistoryIndex:-1,queueFiles:[],queueBytes:0,queueTopItems:[],queueTopTotal:0,queuePreparing:false,queuePreparedCount:0,queuePrepToken:0,uploading:false,cancelUpload:false,currentXhr:null,selectedBusy:false,listOffset:0,listLimit:500,hasMore:false,listLoadingMore:false,uploadUiTs:0,uploadUiPct:-1,uploadUiMsg:'',securityMode:'unsecure',overwriteAll:true,queueGuardKey:'',uploadOwner:UPLOAD_OWNER,lockHeld:false,remoteUploadBusy:false,remoteUploadOwner:'',remoteUploadPath:'',remoteUploadSince:0};"
                         "function qs(id){return document.getElementById(id);}"
                         "function detectTheme(){try{return window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}catch(e){return 'light';}}"
                         "function applyTheme(theme){const t=(theme==='dark'||theme==='light')?theme:detectTheme();document.body.setAttribute('data-theme',t);const btn=qs('themeToggleBtn');if(btn){const target=t==='dark'?'light':'dark';btn.setAttribute('aria-label','Switch to '+target+' mode');btn.title='Switch to '+target+' mode';}try{localStorage.setItem(THEME_KEY,t);}catch(e){}}"
@@ -2669,14 +2848,27 @@ static int serve_web_index(server_ctx_t *ctx, int client_fd) {
                         "function cleanRelPath(p){let s=String(p||'');s=s.replace(/\\\\/g,'/');s=s.replace(/^\\/+/, '');s=s.replace(/\\/+/g,'/');return s;}"
                         "function relPathOf(file){if(!file)return '';return cleanRelPath(file.__rel_path||file.webkitRelativePath||file.name||'');}"
                         "function computeQueueBytes(files){let bytes=0;for(const f of (files||[])){if(!f||typeof f.size!=='number')continue;bytes+=Number(f.size)||0;}return bytes;}"
+                        "function queueLength(files){return (files&&typeof files.length==='number')?Number(files.length):0;}"
+                        "function queueSliceFrom(files,start){const out=[];const total=queueLength(files);for(let i=Math.max(0,Number(start)||0);i<total;i++)out.push(files[i]);return out;}"
+                        "function queueRiskSummary(files,totalBytes){const count=queueLength(files);const raw=Number(totalBytes);const bytes=Number.isFinite(raw)?raw:-1;return {count:count,bytes:bytes,ops:count*2};}"
+                        "function queueRiskKey(info){return String((info&&info.count)||0);}"
+                        "function shouldAcceptLargeSelection(files,totalBytes,phase,resumeMode){const info=queueRiskSummary(files,totalBytes);if(!info.count)return true;if(UPLOAD_BLOCK_FILE_COUNT>0&&info.count>=UPLOAD_BLOCK_FILE_COUNT){alert('Selection too large for web upload: '+info.count+' files. Please split into smaller batches.');log('Selection blocked: '+info.count+' files exceeds hard limit '+UPLOAD_BLOCK_FILE_COUNT+'.');setUploadProgress(0,'Selection too large - split into batches',true);return false;}const hasBytes=info.bytes>=0;const warn=(info.count>=UPLOAD_WARN_FILE_COUNT)||(hasBytes&&info.bytes>=UPLOAD_WARN_TOTAL_BYTES);if(!warn)return true;const phaseLabel=phase==='start'?(resumeMode?'resume':'upload'):'queue';const sizeText=hasBytes?formatSize(info.bytes):'calculating...';const msg=['Large selection detected for '+phaseLabel+':','Files: '+info.count,'Size: '+sizeText,'Estimated API operations: ~'+info.ops+' (stat + upload per file)','',BRAND_NAME+' web UI may become unstable with very large queues. Continue anyway?'].join('\\n');if(!confirm(msg)){log('Large selection canceled by user: '+info.count+' files, '+sizeText+'.');setUploadProgress(0,'Selection canceled',true);return false;}log('Large selection confirmed: '+info.count+' files, '+sizeText+'.');return true;}"
                         "async function readAllEntries(reader){return await new Promise((resolve)=>{const out=[];const pump=()=>{reader.readEntries((batch)=>{if(!batch||!batch.length){resolve(out);return;}out.push(...batch);pump();},()=>resolve(out));};pump();});}"
                         "async function filesFromEntry(entry,prefix){if(!entry)return [];if(entry.isFile){return await new Promise((resolve)=>{entry.file((f)=>{try{f.__rel_path=cleanRelPath((prefix||'')+f.name);}catch(e){}resolve([f]);},()=>resolve([]));});}if(entry.isDirectory){const dirPrefix=cleanRelPath((prefix||'')+String(entry.name||'')+'/');const reader=entry.createReader();const children=await readAllEntries(reader);let out=[];for(const child of children){const more=await filesFromEntry(child,dirPrefix);if(more&&more.length)out=out.concat(more);}return out;}return [];}"
                         "async function collectDropFiles(dt){if(!dt)return [];const items=dt.items?[...dt.items]:[];if(items.length){let out=[];for(const it of items){if(!it||it.kind!=='file')continue;const entry=it.webkitGetAsEntry?it.webkitGetAsEntry():null;if(entry){const more=await filesFromEntry(entry,'');if(more&&more.length)out=out.concat(more);continue;}const f=it.getAsFile?it.getAsFile():null;if(f){try{if(!f.__rel_path)f.__rel_path=cleanRelPath(f.name);}catch(e){}out.push(f);}}if(out.length)return out;}const files=dt.files?[...dt.files]:[];for(const f of files){try{if(f&&!f.__rel_path)f.__rel_path=cleanRelPath(f.webkitRelativePath||f.name);}catch(e){}}return files;}"
                         "function selectedEntry(){if(!state.selected)return null;if(normPath(state.selected)===normPath(state.path)){return {name:basenameOf(state.path)||'/',is_dir:true};}for(const e of state.entries){if(join(state.path,e.name)===state.selected)return e;}return null;}"
                         "function log(msg){const el=qs('log');if(!el)return;const time=new Date().toLocaleTimeString();const line='['+time+'] '+msg;const lines=(el.textContent?el.textContent.split('\\n').filter(Boolean):[]);lines.unshift(line);el.textContent=lines.slice(0,200).join('\\n');}"
-                        "async function apiJson(path,opt){const r=await fetch(api+path,opt||{});if(!r.ok){throw new Error(await r.text());}return r.json();}"
+                        "async function apiJson(path,opt){const r=await fetch(api+path,opt||{});const text=await r.text();let parsed=false;let data=null;if(text){try{data=JSON.parse(text);parsed=true;}catch(e){}}if(!r.ok){const msg=(data&&typeof data==='object'&&data.error)?String(data.error):String(text||('HTTP '+r.status));const err=new Error(msg);err.status=r.status;err.body=text;err.payload=data;throw err;}if(parsed)return data;if(!text)return {};throw new Error('invalid json response');}"
+                        "function sleepMs(ms){return new Promise((resolve)=>setTimeout(resolve,Math.max(0,Number(ms)||0)));}"
+                        "function isRetryableApiError(err){if(!err)return false;const status=Number(err.status)||0;if(status===408||status===425||status===429||status===500||status===502||status===503||status===504)return true;const msg=String(err&&err.message||err);return /failed to fetch|networkerror|load failed|timed out|timeout|fetch failed/i.test(msg);}"
+                        "async function apiJsonWithRetry(path,opt,maxAttempts,label){const total=Math.max(1,Number(maxAttempts)||1);let lastErr=null;for(let attempt=1;attempt<=total;attempt++){try{return await apiJson(path,opt);}catch(err){lastErr=err;if(attempt>=total||!isRetryableApiError(err))throw err;const wait=Math.min(2000,250*attempt);if(label)log(label+' failed ('+String(err&&err.message||err)+'), retry '+attempt+'/'+(total-1));await sleepMs(wait);}}throw lastErr||new Error('request failed');}"
                         "function updateSecurityMode(mode){const raw=String(mode||'').toLowerCase();const m=raw==='secure'?'secure':'unsecure';state.securityMode=m;const chip=qs('modeChip');if(chip){chip.textContent='Mode: '+(m==='secure'?'Secure':'Insecure');chip.classList.remove('mode-chip-secure','mode-chip-insecure');chip.classList.add(m==='secure'?'mode-chip-secure':'mode-chip-insecure');}}"
-                        "async function keepAlive(){try{const h=await apiJson('/api/health');const vc=qs('versionText');if(vc&&h&&h.version)vc.textContent='v'+h.version;if(h&&h.security_mode)updateSecurityMode(h.security_mode);}catch(err){}}"
+                        "function applyUploadLockState(payload){if(!payload)return;const busy=!!payload.upload_lock_busy;const owner=String(payload.upload_lock_owner||'');const path=String(payload.upload_lock_path||'');const started=Number(payload.upload_lock_started_at)||0;const prevBusy=!!state.remoteUploadBusy;const prevPath=String(state.remoteUploadPath||'');state.remoteUploadBusy=busy;state.remoteUploadOwner=owner;state.remoteUploadPath=path;state.remoteUploadSince=started;state.lockHeld=busy&&owner===state.uploadOwner;if(busy&&!state.lockHeld&&(!prevBusy||prevPath!==path)){log('Another client is uploading'+(path?': '+path:''));if(!state.uploading&&!state.queuePreparing){setUploadProgress(qs('uploadProgress')?qs('uploadProgress').value:0,'Upload locked by another client'+(path?': '+path:''),true);}}if(!busy&&prevBusy&&!state.uploading&&!state.queuePreparing){setUploadProgress(0,queueLength(state.queueFiles)?'Ready':'Idle',true);}setUploadUIState();}"
+                        "function uploadLockQuery(action,path){let extra='';if(path!==undefined&&path!==null&&String(path)!=='')extra='&path='+qp(String(path));return '/api/upload/lock?action='+qp(action)+'&owner='+qp(state.uploadOwner)+extra;}"
+                        "async function fetchUploadLockState(){if(state.uploading)return;try{const s=await apiJsonWithRetry('/api/upload/state',null,2,'Lock state');applyUploadLockState(s);}catch(err){}}"
+                        "async function acquireUploadLock(path){const s=await apiJsonWithRetry(uploadLockQuery('acquire',path),{method:'POST'},3,'Acquire lock');applyUploadLockState(s);return !!(s&&s.acquired);}"
+                        "async function releaseUploadLock(){if(!state.lockHeld)return;try{const s=await apiJson(uploadLockQuery('release',''),{method:'POST'});applyUploadLockState(s);}catch(err){}finally{state.lockHeld=false;setUploadUIState();}}"
+                        "async function keepAlive(){if(state.uploading)return;try{const h=await apiJsonWithRetry('/api/health',null,2,'Health');const vc=qs('versionText');if(vc&&h&&h.version)vc.textContent='v'+h.version;if(h&&h.security_mode)updateSecurityMode(h.security_mode);applyUploadLockState(h);}catch(err){}}"
                         "async function stopPayload(){if(!confirm('Stop '+BRAND_NAME+' now? You can reload payload after this.'))return;const btn=qs('stopBtn');if(btn)btn.disabled=true;try{await fetch(api+'/api/stop',{method:'POST'});log('Stop requested. Payload shutting down...');}catch(err){log('Stop requested. Connection closed while shutting down.');}setUploadProgress(0,'Stopping payload...');}"
                         "function downloadConfig(){window.location=api+'/api/config/download';}"
                         "function pickConfigUpload(){if(state.uploading){log('Stop current upload first');return;}const input=qs('uploadConfigInput');if(!input)return;input.value='';input.click();}"
@@ -2715,19 +2907,19 @@ static int serve_web_index(server_ctx_t *ctx, int client_fd) {
                         "function setUploadProgress(percent,msg,force){const bar=qs('uploadProgress');const status=qs('uploadStatus');const mainEl=qs('uploadStatusMain')||status;const detailEl=qs('uploadStatusDetail');const fileEl=qs('uploadStatusFile');const pct=Math.max(0,Math.min(100,Math.floor(Number(percent)||0)));const now=Date.now();if(bar&&(force||pct!==state.uploadUiPct))bar.value=pct;if(msg!==undefined&&mainEl){let parts=(msg&&typeof msg==='object')?{main:String(msg.main||''),detail:String(msg.detail||''),file:String(msg.file||'')}:splitUploadStatus(msg);if(!parts.main)parts.main=String(msg);const key=parts.main+'\\n'+parts.detail+'\\n'+parts.file;const low=key.toLowerCase();if(force||now-state.uploadUiTs>=120||pct===0||pct===100||low.indexOf('failed')>=0||low.indexOf('done')>=0||low.indexOf('stopped')>=0){mainEl.textContent=parts.main;if(detailEl)detailEl.textContent=parts.detail||'';if(fileEl)fileEl.textContent=parts.file||'';state.uploadUiTs=now;state.uploadUiMsg=key;}}state.uploadUiPct=pct;}"
                         "function renderOverwriteMode(){const btn=qs('overwriteAllBtn');if(!btn)return;const all=!!state.overwriteAll;btn.textContent=all?'Overwrite: All':'Overwrite: Ask';btn.classList.remove('btn-ghost','sloth-btn-ghost','btn-danger','sloth-btn-danger');btn.classList.add(all?'btn-danger':'btn-ghost');btn.classList.add(all?'sloth-btn-danger':'sloth-btn-ghost');}"
                         "function toggleOverwriteMode(){if(state.uploading)return;state.overwriteAll=!state.overwriteAll;renderOverwriteMode();log('Overwrite mode: '+(state.overwriteAll?'all existing files':'ask per file'));}"
-                        "function setUploadUIState(){const uploading=!!state.uploading;const busy=uploading;const start=qs('uploadStartBtn');const resume=qs('resumeUploadBtn');const stop=qs('uploadStopBtn');const over=qs('overwriteAllBtn');const pickFilesBtn=qs('pickFilesBtn');const pickFolderBtn=qs('pickFolderBtn');if(start)start.disabled=busy||!state.queueFiles.length;if(resume)resume.disabled=busy||!state.queueFiles.length;if(stop)stop.disabled=!uploading;if(over)over.disabled=busy;if(pickFilesBtn)pickFilesBtn.disabled=busy;if(pickFolderBtn)pickFolderBtn.disabled=busy;}"
+                        "function setUploadUIState(){const uploading=!!state.uploading;const busy=uploading;const waiting=!!state.queuePreparing;const lockedByOther=!!state.remoteUploadBusy&&!state.lockHeld;const count=queueLength(state.queueFiles);const start=qs('uploadStartBtn');const resume=qs('resumeUploadBtn');const stop=qs('uploadStopBtn');const over=qs('overwriteAllBtn');const pickFilesBtn=qs('pickFilesBtn');const pickFolderBtn=qs('pickFolderBtn');if(start)start.disabled=busy||waiting||lockedByOther||!count;if(resume)resume.disabled=busy||waiting||lockedByOther||!count;if(stop)stop.disabled=!uploading;if(over)over.disabled=busy||lockedByOther;if(pickFilesBtn)pickFilesBtn.disabled=busy;if(pickFolderBtn)pickFolderBtn.disabled=busy;}"
                         "function queueTopLevelItems(){return Array.isArray(state.queueTopItems)?state.queueTopItems:[];}"
-                        "function queueTopPush(rel,topMap,topItems){const s=cleanRelPath(rel||'');if(!s)return;const slash=s.indexOf('/');const top=slash>=0?s.slice(0,slash):s;if(!top)return;const isDir=slash>=0;const prev=topMap[top];if(prev){if(isDir)prev.is_dir=true;return;}const it={name:top,is_dir:isDir};topMap[top]=it;topItems.push(it);}"
+                        "function queueTopPush(rel,topMap,topItems,stats){const s=cleanRelPath(rel||'');if(!s)return;const slash=s.indexOf('/');const top=slash>=0?s.slice(0,slash):s;if(!top)return;const isDir=slash>=0;const prev=topMap[top];if(prev){if(isDir&&prev.item)prev.item.is_dir=true;return;}const it={name:top,is_dir:isDir};topMap[top]={item:it};stats.total+=1;if(topItems.length<stats.keep)topItems.push(it);}"
                         "function queueChip(item,isMore){const chip=document.createElement('span');chip.className='mono';chip.style.display='inline-flex';chip.style.alignItems='center';chip.style.gap='.36rem';chip.style.maxWidth='100%';chip.style.padding='.22rem .52rem';chip.style.border='1px solid var(--sloth-line)';chip.style.borderRadius='999px';chip.style.background=isMore?'var(--panel-soft)':'linear-gradient(180deg,var(--panel-bg),var(--chip-bg))';chip.style.color='var(--sloth-ink)';chip.style.fontSize='.76rem';chip.style.fontWeight='600';chip.style.boxShadow='0 1px 0 rgba(255,255,255,.1)';if(isMore){chip.textContent=String(item||'');return chip;}const badge=document.createElement('span');badge.className='mono';badge.style.display='inline-flex';badge.style.alignItems='center';badge.style.justifyContent='center';badge.style.minWidth='3.2em';badge.style.padding='0 .34rem';badge.style.fontSize='.64rem';badge.style.border='1px solid var(--sloth-line)';badge.style.borderRadius='999px';badge.style.background=(item&&item.is_dir)?'var(--kind-dir-bg)':'var(--kind-file-bg)';badge.style.color=(item&&item.is_dir)?'var(--kind-dir-ink)':'var(--sloth-muted)';badge.textContent=(item&&item.is_dir)?uiTr('dir','DIR'):uiTr('file','FILE');const name=document.createElement('span');name.style.minWidth='0';name.style.overflow='hidden';name.style.textOverflow='ellipsis';name.style.whiteSpace='nowrap';name.textContent=String((item&&item.name)||'');chip.appendChild(badge);chip.appendChild(name);return chip;}"
-                        "function renderQueueList(){const list=qs('queueList');if(!list)return;const items=queueTopLevelItems();list.textContent='';if(!items.length){list.style.display='none';return;}const maxRows=12;const total=items.length;for(let i=0;i<total&&i<maxRows;i++)list.appendChild(queueChip(items[i],false));if(total>maxRows)list.appendChild(queueChip('+'+String(total-maxRows)+' more',true));list.style.display='flex';}"
-                        "function renderQueueInfo(){const info=qs('queueInfo');if(!info)return;if(!state.queueFiles.length){info.textContent='No selection';renderQueueList();setUploadUIState();return;}if(state.queuePreparing){info.textContent='Processing selection... '+String(state.queuePreparedCount)+'/'+String(state.queueFiles.length);}else{const fileWord=state.queueFiles.length===1?'file':'files';info.textContent='Selected '+state.queueFiles.length+' '+fileWord+' ('+formatSize(state.queueBytes)+')';}renderQueueList();setUploadUIState();}"
-                        "function setQueue(files,_isFolder){if(state.uploading){log('Cannot change queue while upload is running');return;}const src=files?[...files]:[];state.queuePrepToken=(Number(state.queuePrepToken)||0)+1;const token=state.queuePrepToken;state.queueFiles=src;state.queueBytes=0;state.queueTopItems=[];state.queuePreparing=false;state.queuePreparedCount=0;state.uploadUiTs=0;state.uploadUiPct=-1;if(!src.length){renderQueueInfo();setUploadProgress(0,'Idle',true);return;}state.queuePreparing=true;renderQueueInfo();setUploadProgress(0,'Processing selection...',true);const topMap={};const topItems=[];const total=src.length;const step=()=>{if(token!==state.queuePrepToken)return;const start=state.queuePreparedCount;const end=Math.min(total,start+3000);for(let i=start;i<end;i++){if(token!==state.queuePrepToken)return;const f=src[i];if(!f||typeof f.size!=='number')continue;const rel=relPathOf(f);if(!rel)continue;try{if(!f.__rel_path)f.__rel_path=rel;}catch(e){}state.queueBytes+=Number(f.size)||0;queueTopPush(rel,topMap,topItems);}state.queuePreparedCount=end;state.queueTopItems=topItems.slice();renderQueueInfo();if(end<total){setTimeout(step,0);return;}state.queuePreparing=false;renderQueueInfo();if(!state.uploading)setUploadProgress(0,'Ready',true);log('Selected '+state.queueFiles.length+' file(s), '+formatSize(state.queueBytes));};setTimeout(step,0);}"
+                        "function renderQueueList(){const list=qs('queueList');if(!list)return;const items=queueTopLevelItems();const total=Math.max(Number(state.queueTopTotal)||0,items.length);list.textContent='';if(!items.length){list.style.display='none';return;}const maxRows=12;const shown=Math.min(items.length,maxRows);for(let i=0;i<shown;i++)list.appendChild(queueChip(items[i],false));if(total>maxRows)list.appendChild(queueChip('+'+String(total-maxRows)+' more',true));list.style.display='flex';}"
+                        "function renderQueueInfo(){const info=qs('queueInfo');if(!info)return;const count=queueLength(state.queueFiles);if(!count){info.textContent='No selection';renderQueueList();setUploadUIState();return;}if(state.queuePreparing){info.textContent='Processing selection... '+String(state.queuePreparedCount)+'/'+String(count);}else{const fileWord=count===1?'file':'files';info.textContent='Selected '+count+' '+fileWord+' ('+formatSize(state.queueBytes)+')';}renderQueueList();setUploadUIState();}"
+                        "function setQueue(files,_isFolder){if(state.uploading){log('Cannot change queue while upload is running');return;}const src=(files&&typeof files.length==='number')?files:[];const count=queueLength(src);let guardBytes=-1;if(count>0&&count<UPLOAD_WARN_FILE_COUNT)guardBytes=computeQueueBytes(src);const info=queueRiskSummary(src,guardBytes);if(!shouldAcceptLargeSelection(src,guardBytes,'queue',false))return;const guardKey=queueRiskKey(info);state.queuePrepToken=(Number(state.queuePrepToken)||0)+1;const token=state.queuePrepToken;state.queueGuardKey=guardKey;state.queueFiles=src;state.queueBytes=0;state.queueTopItems=[];state.queueTopTotal=0;state.queuePreparing=false;state.queuePreparedCount=0;state.uploadUiTs=0;state.uploadUiPct=-1;if(!count){state.queueGuardKey='';renderQueueInfo();setUploadProgress(0,'Idle',true);return;}state.queuePreparing=true;renderQueueInfo();setUploadProgress(0,'Processing selection...',true);const topMap={};const topItems=[];const topStats={total:0,keep:256};const total=count;const step=()=>{if(token!==state.queuePrepToken)return;const start=state.queuePreparedCount;const end=Math.min(total,start+3000);for(let i=start;i<end;i++){if(token!==state.queuePrepToken)return;const f=src[i];if(!f||typeof f.size!=='number')continue;const rel=relPathOf(f);if(!rel)continue;try{if(!f.__rel_path)f.__rel_path=rel;}catch(e){}state.queueBytes+=Number(f.size)||0;queueTopPush(rel,topMap,topItems,topStats);}state.queuePreparedCount=end;state.queueTopItems=topItems;state.queueTopTotal=topStats.total;renderQueueInfo();if(end<total){setTimeout(step,0);return;}state.queuePreparing=false;renderQueueInfo();if(!state.uploading)setUploadProgress(0,'Ready',true);log('Selected '+queueLength(state.queueFiles)+' file(s), '+formatSize(state.queueBytes));};setTimeout(step,0);}"
                         "function pickFiles(){if(state.uploading){log('Stop current upload first');return;}const info=qs('queueInfo');if(info)info.textContent='Waiting for file selection...';setUploadProgress(0,'Waiting for file selection...',true);qs('uploadFiles').click();}"
                         "function pickFolder(){if(state.uploading){log('Stop current upload first');return;}const info=qs('queueInfo');if(info)info.textContent='Waiting for folder selection...';setUploadProgress(0,'Waiting for folder selection...',true);qs('uploadFolder').click();}"
                         "function stopUpload(){if(!state.uploading){log('No active upload');return;}state.cancelUpload=true;const xhr=state.currentXhr;if(xhr){try{xhr.abort();}catch(e){}}setUploadProgress(qs('uploadProgress')?qs('uploadProgress').value:0,'Stopping upload...',true);log('Stop upload requested');}"
-                        "function uploadOne(dest,file,onProgress){return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();state.currentXhr=xhr;xhr.open('PUT',api+'/api/upload?path='+qp(dest));xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.upload.onprogress=(ev)=>{if(ev.lengthComputable&&onProgress)onProgress(ev.loaded,ev.total);};xhr.onerror=()=>{if(state.currentXhr===xhr)state.currentXhr=null;reject(new Error('network error'));};xhr.onabort=()=>{if(state.currentXhr===xhr)state.currentXhr=null;reject(new Error('upload canceled'));};xhr.onload=()=>{if(state.currentXhr===xhr)state.currentXhr=null;if(xhr.status>=200&&xhr.status<300)resolve();else reject(new Error(xhr.responseText||('HTTP '+xhr.status)));};xhr.send(file);});}"
-                        "async function shouldUploadToPath(dst,fileSize,resumeMode){const st=await apiJson('/api/stat?path='+qp(dst));if(!st||!st.exists)return true;if(st.is_dir){const ok=confirm('Target exists as folder:\\n'+dst+'\\nOK: skip this item\\nCancel: stop upload');if(ok){log('Skipped existing folder '+dst);return false;}throw new Error('upload canceled');}const remoteSize=Number(st.size)||0;const localSize=Number(fileSize)||0;if(resumeMode&&remoteSize===localSize){log('Resume skipped same-size file '+dst);return false;}if(resumeMode)return true;if(state.overwriteAll)return true;if(!confirm('Overwrite existing file?\\n'+dst)){log('Skipped existing '+dst);return false;}return true;}"
-                        "async function runUpload(resumeMode){if(state.uploading){log('Upload already running');return;}if(!state.queueFiles.length){log('No files selected. Use Browse Files or Browse Folder.');return;}state.uploading=true;state.cancelUpload=false;setUploadUIState();const files=state.queueFiles.slice();const base=state.path;const totalBytes=Math.max(1,files.reduce((acc,f)=>acc+(Number(f&&f.size)||0),0));let doneBytes=0;let uploaded=0;let skipped=0;let speedBps=0;let canceled=false;let failed=false;const startTs=Date.now();let lastTs=startTs;let lastBytes=0;setUploadProgress(0,(resumeMode?'Resuming ':'Uploading ')+'0/'+files.length,true);for(let i=0;i<files.length;i++){const f=files[i];if(state.cancelUpload){canceled=true;state.queueFiles=files.slice(i);break;}const rel=relPathOf(f);if(!rel)continue;const fileSize=Number(f.size)||0;const dst=join(base,rel);let allow=false;try{allow=await shouldUploadToPath(dst,fileSize,resumeMode);}catch(err){if(state.cancelUpload||/canceled/i.test(String(err&&err.message||''))){canceled=true;state.queueFiles=files.slice(i);break;}failed=true;state.queueFiles=files.slice(i);setUploadProgress((doneBytes/totalBytes)*100,'Upload failed',true);log('Pre-check failed '+dst+': '+err.message);break;}if(!allow){skipped+=1;doneBytes+=fileSize;setUploadProgress((doneBytes/totalBytes)*100,'Skipped '+rel,false);continue;}try{await uploadOne(dst,f,(loaded,total)=>{const t=Number(total)||1;const now=Date.now();const doneNow=doneBytes+loaded;const dt=(now-lastTs)/1000;if(dt>=0.2){const inst=(doneNow-lastBytes)/Math.max(dt,0.001);speedBps=speedBps>0?(speedBps*0.7+inst*0.3):inst;lastTs=now;lastBytes=doneNow;}const avgBps=doneNow/Math.max((now-startTs)/1000,0.001);const showBps=speedBps>0?speedBps:avgBps;const remain=Math.max(0,totalBytes-doneNow);const eta=remain/Math.max(avgBps,1);const pct=(doneNow/Math.max(totalBytes,t))*100;setUploadProgress(pct,'Uploading '+(uploaded+1)+'/'+files.length+': '+rel+' | '+formatRate(showBps)+' | ETA '+formatEta(eta),false);});doneBytes+=fileSize;uploaded+=1;const avgDoneBps=doneBytes/Math.max((Date.now()-startTs)/1000,0.001);setUploadProgress((doneBytes/totalBytes)*100,'Uploaded '+uploaded+'/'+files.length+' | '+formatRate(avgDoneBps),true);log('Uploaded '+dst);}catch(err){if(state.cancelUpload||/canceled/i.test(String(err&&err.message||''))){canceled=true;state.queueFiles=files.slice(i);break;}failed=true;state.queueFiles=files.slice(i);setUploadProgress((doneBytes/totalBytes)*100,'Upload failed',true);log('Upload failed '+dst+': '+err.message);break;}}if(!canceled&&!failed){state.queueFiles=[];state.queueBytes=0;state.queueTopItems=[];state.queuePreparing=false;state.queuePreparedCount=0;state.queuePrepToken=(Number(state.queuePrepToken)||0)+1;const totalSec=Math.max((Date.now()-startTs)/1000,0.001);let doneMsg='Done '+uploaded+'/'+files.length;if(skipped>0)doneMsg+=' (skipped '+skipped+')';doneMsg+=' | Avg '+formatRate(doneBytes/totalSec);setUploadProgress(100,doneMsg,true);}if(canceled){const remainCount=state.queueFiles.length;const pct=(doneBytes/totalBytes)*100;setUploadProgress(pct,'Upload stopped ('+remainCount+' remaining)',true);log('Upload stopped. Remaining '+remainCount+' file(s).');}state.uploading=false;state.cancelUpload=false;state.currentXhr=null;qs('uploadFiles').value='';qs('uploadFolder').value='';state.queueBytes=computeQueueBytes(state.queueFiles);renderQueueInfo();setUploadUIState();if(uploaded>0||skipped>0)refreshList(false);}"
+                        "function uploadOne(dest,file,onProgress){return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();state.currentXhr=xhr;xhr.open('PUT',api+'/api/upload?path='+qp(dest)+'&owner='+qp(state.uploadOwner));xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.upload.onprogress=(ev)=>{if(ev.lengthComputable&&onProgress)onProgress(ev.loaded,ev.total);};xhr.onerror=()=>{if(state.currentXhr===xhr)state.currentXhr=null;reject(new Error('network error'));};xhr.onabort=()=>{if(state.currentXhr===xhr)state.currentXhr=null;reject(new Error('upload canceled'));};xhr.onload=()=>{if(state.currentXhr===xhr)state.currentXhr=null;if(xhr.status>=200&&xhr.status<300)resolve();else reject(new Error(xhr.responseText||('HTTP '+xhr.status)));};xhr.send(file);});}"
+                        "async function shouldUploadToPath(dst,fileSize,resumeMode){let st=null;try{st=await apiJsonWithRetry('/api/stat?path='+qp(dst),null,4,'Pre-check');}catch(err){const msg=String(err&&err.message||err);if(resumeMode||state.overwriteAll){log('Pre-check failed '+dst+': '+msg+' (continuing upload)');return true;}const ok=confirm('Pre-check failed:\\n'+dst+'\\n'+msg+'\\n\\nOK: upload anyway\\nCancel: stop upload');if(ok){log('Pre-check failed '+dst+': '+msg+' (user forced upload)');return true;}throw new Error('upload canceled');}if(!st||!st.exists)return true;if(st.is_dir){const ok=confirm('Target exists as folder:\\n'+dst+'\\nOK: skip this item\\nCancel: stop upload');if(ok){log('Skipped existing folder '+dst);return false;}throw new Error('upload canceled');}const remoteSize=Number(st.size)||0;const localSize=Number(fileSize)||0;if(resumeMode&&remoteSize===localSize){log('Resume skipped same-size file '+dst);return false;}if(resumeMode)return true;if(state.overwriteAll)return true;if(!confirm('Overwrite existing file?\\n'+dst)){log('Skipped existing '+dst);return false;}return true;}"
+                        "async function runUpload(resumeMode){if(state.uploading){log('Upload already running');return;}if(state.queuePreparing){log('Queue is still preparing. Please wait.');return;}if(!queueLength(state.queueFiles)){log('No files selected. Use Browse Files or Browse Folder.');return;}const files=state.queueFiles;const base=state.path;let totalBytes=Number(state.queueBytes);if(!Number.isFinite(totalBytes)||totalBytes<0)totalBytes=computeQueueBytes(files);totalBytes=Math.max(1,totalBytes);const info=queueRiskSummary(files,totalBytes);const guardKey=queueRiskKey(info);if(state.queueGuardKey!==guardKey){if(!shouldAcceptLargeSelection(files,totalBytes,'start',resumeMode))return;state.queueGuardKey=guardKey;}let gotLock=false;try{gotLock=await acquireUploadLock(base);}catch(err){setUploadProgress(qs('uploadProgress')?qs('uploadProgress').value:0,'Upload lock check failed',true);log('Upload lock check failed: '+err.message);return;}if(!gotLock){const busyPath=state.remoteUploadPath||'/';setUploadProgress(qs('uploadProgress')?qs('uploadProgress').value:0,'Upload locked by another client: '+busyPath,true);log('Upload blocked by active lock at '+busyPath);return;}state.uploading=true;state.cancelUpload=false;setUploadUIState();let doneBytes=0;let uploaded=0;let skipped=0;let speedBps=0;let canceled=false;let failed=false;const startTs=Date.now();let lastTs=startTs;let lastBytes=0;const totalFiles=queueLength(files);setUploadProgress(0,(resumeMode?'Resuming ':'Uploading ')+'0/'+totalFiles,true);for(let i=0;i<totalFiles;i++){const f=files[i];if(state.cancelUpload){canceled=true;state.queueFiles=queueSliceFrom(files,i);break;}const rel=relPathOf(f);if(!rel)continue;const fileSize=Number(f.size)||0;const dst=join(base,rel);let allow=false;try{allow=await shouldUploadToPath(dst,fileSize,resumeMode);}catch(err){if(state.cancelUpload||/canceled/i.test(String(err&&err.message||''))){canceled=true;state.queueFiles=queueSliceFrom(files,i);break;}failed=true;state.queueFiles=queueSliceFrom(files,i);setUploadProgress((doneBytes/totalBytes)*100,'Upload failed',true);log('Pre-check failed '+dst+': '+err.message);break;}if(!allow){skipped+=1;doneBytes+=fileSize;setUploadProgress((doneBytes/totalBytes)*100,'Skipped '+rel,false);continue;}try{await uploadOne(dst,f,(loaded,total)=>{const t=Number(total)||1;const now=Date.now();const doneNow=doneBytes+loaded;const dt=(now-lastTs)/1000;if(dt>=0.2){const inst=(doneNow-lastBytes)/Math.max(dt,0.001);speedBps=speedBps>0?(speedBps*0.7+inst*0.3):inst;lastTs=now;lastBytes=doneNow;}const avgBps=doneNow/Math.max((now-startTs)/1000,0.001);const showBps=speedBps>0?speedBps:avgBps;const remain=Math.max(0,totalBytes-doneNow);const eta=remain/Math.max(avgBps,1);const pct=(doneNow/Math.max(totalBytes,t))*100;setUploadProgress(pct,'Uploading '+(uploaded+1)+'/'+totalFiles+': '+rel+' | '+formatRate(showBps)+' | ETA '+formatEta(eta),false);});doneBytes+=fileSize;uploaded+=1;const avgDoneBps=doneBytes/Math.max((Date.now()-startTs)/1000,0.001);setUploadProgress((doneBytes/totalBytes)*100,'Uploaded '+uploaded+'/'+totalFiles+' | '+formatRate(avgDoneBps),true);log('Uploaded '+dst);}catch(err){if(state.cancelUpload||/canceled/i.test(String(err&&err.message||''))){canceled=true;state.queueFiles=queueSliceFrom(files,i);break;}failed=true;state.queueFiles=queueSliceFrom(files,i);setUploadProgress((doneBytes/totalBytes)*100,'Upload failed',true);log('Upload failed '+dst+': '+err.message);break;}}if(!canceled&&!failed){state.queueFiles=[];state.queueBytes=0;state.queueTopItems=[];state.queueTopTotal=0;state.queuePreparing=false;state.queuePreparedCount=0;state.queuePrepToken=(Number(state.queuePrepToken)||0)+1;state.queueGuardKey='';const totalSec=Math.max((Date.now()-startTs)/1000,0.001);let doneMsg='Done '+uploaded+'/'+totalFiles;if(skipped>0)doneMsg+=' (skipped '+skipped+')';doneMsg+=' | Avg '+formatRate(doneBytes/totalSec);setUploadProgress(100,doneMsg,true);}if(canceled){const remainCount=queueLength(state.queueFiles);const pct=(doneBytes/totalBytes)*100;setUploadProgress(pct,'Upload stopped ('+remainCount+' remaining)',true);log('Upload stopped. Remaining '+remainCount+' file(s).');}state.uploading=false;state.cancelUpload=false;state.currentXhr=null;qs('uploadFiles').value='';qs('uploadFolder').value='';state.queueBytes=computeQueueBytes(state.queueFiles);state.queueTopItems=[];state.queueTopTotal=0;const remainCount=queueLength(state.queueFiles);state.queueGuardKey=remainCount?queueRiskKey(queueRiskSummary(state.queueFiles,state.queueBytes)):'';renderQueueInfo();setUploadUIState();if(uploaded>0||skipped>0)refreshList(false);await releaseUploadLock();}"
                         "async function startUpload(){return runUpload(false);}"
                         "async function resumeUpload(){return runUpload(true);}"
                         "async function onDrop(ev){ev.preventDefault();qs('dropZone').classList.remove('dragover');if(state.uploading){log('Stop current upload before adding more files');return;}const info=qs('queueInfo');if(info)info.textContent='Reading dropped items...';setUploadProgress(0,'Reading dropped items...',true);try{const files=await collectDropFiles(ev.dataTransfer);if(!files.length){log('No files detected from drop.');setUploadProgress(0,'Idle',true);return;}setQueue(files,false);}catch(err){log('Drop parse failed: '+err.message);setUploadProgress(0,'Idle',true);}}"
@@ -2745,7 +2937,8 @@ static int serve_web_index(server_ctx_t *ctx, int client_fd) {
                         "qs('pathInput').addEventListener('keydown',(ev)=>{if(ev.key==='Enter'){ev.preventDefault();refreshList();}});"
                         "qs('renameInput').addEventListener('keydown',(ev)=>{if(ev.key==='Enter'){ev.preventDefault();renameSelected();}});"
                         "qs('moveInput').addEventListener('keydown',(ev)=>{if(ev.key==='Enter'){ev.preventDefault();moveSelected();}});"
-                        "initTheme();setPath('/');updateSelectionUI();setSelectedOpProgress(0,uiTr('selected_action_idle','Selected action: idle'));renderQueueInfo();renderOverwriteMode();setUploadUIState();setListUIState();refreshList(false);keepAlive();setInterval(keepAlive,15000);"
+                        "window.addEventListener('beforeunload',()=>{if(!state.lockHeld)return;try{fetch(api+uploadLockQuery('release',''),{method:'POST',keepalive:true});}catch(e){}});"
+                        "initTheme();setPath('/');updateSelectionUI();setSelectedOpProgress(0,uiTr('selected_action_idle','Selected action: idle'));renderQueueInfo();renderOverwriteMode();setUploadUIState();setListUIState();refreshList(false);keepAlive();fetchUploadLockState();setInterval(keepAlive,15000);setInterval(fetchUploadLockState,2000);"
                         "</script>");
     rc |= strbuf_append(&html,
                         "<script>"
@@ -2878,6 +3071,8 @@ static int handle_api_request(server_ctx_t *ctx, int client_fd, const http_reque
     if (strcmp(req->method, "POST") == 0 && strcmp(req->path, "/api/stop") == 0) return handle_api_stop(ctx, client_fd);
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/api/config/download") == 0) return handle_api_config_download(ctx, client_fd);
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/api/storage/list") == 0) return handle_api_storage_list(ctx, client_fd);
+    if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/api/upload/state") == 0) return handle_api_upload_state(ctx, client_fd);
+    if (strcmp(req->method, "POST") == 0 && strcmp(req->path, "/api/upload/lock") == 0) return handle_api_upload_lock(ctx, client_fd, req);
     if (strcmp(req->method, "POST") == 0 && strcmp(req->path, "/api/config/upload") == 0) return handle_api_config_upload(ctx, client_fd, req);
     if (strcmp(req->method, "POST") == 0 && strcmp(req->path, "/api/config/reset") == 0) return handle_api_config_reset(ctx, client_fd, req);
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/api/stat") == 0) return handle_api_stat(ctx, client_fd, req);
@@ -3123,6 +3318,7 @@ int ps5drive_server_run(const ps5drive_server_config_t *cfg, volatile sig_atomic
     snprintf(ctx.auth_username, sizeof(ctx.auth_username), "%s", cfg->auth_username ? cfg->auth_username : "");
     snprintf(ctx.auth_password, sizeof(ctx.auth_password), "%s", cfg->auth_password ? cfg->auth_password : "");
     snprintf(ctx.config_path, sizeof(ctx.config_path), "%s", cfg->config_path ? cfg->config_path : "");
+    upload_lock_reset(&ctx);
 
     if (!realpath(cfg->root_dir, ctx.root_abs)) return -1;
     server_log(&ctx, "root=%s", ctx.root_abs);

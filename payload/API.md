@@ -31,6 +31,12 @@ Debug endpoints on `8905` are not behind Basic Auth.
 - `GET /api/health`
 - Returns process/port/runtime info.
 - Includes `security_mode` (`secure` or `unsecure`) and `auth_enabled`.
+- Also includes upload lock state fields:
+  - `upload_lock_busy`
+  - `upload_lock_owner`
+  - `upload_lock_path`
+  - `upload_lock_started_at`
+  - `upload_lock_last_seen_at`
 
 Example:
 
@@ -143,6 +149,9 @@ curl -sS -o cover.png "http://<ps5-ip>:8904/api/games/cover?path=/data/games/PPS
 - `PUT /api/upload?path=/...`
 - Body: raw bytes
 - Header: `Content-Length: <n>`
+- Optional query:
+  - `owner=<client-id>` for lock ownership tracking
+- If upload lock is held by another owner, returns `423` with lock state JSON.
 
 Example:
 
@@ -151,6 +160,37 @@ curl -sS -X PUT \
   --data-binary @local.bin \
   -H "Content-Length: $(stat -c%s local.bin)" \
   "http://<ps5-ip>:8904/api/upload?path=/data/local.bin"
+```
+
+### Upload Lock State
+
+- `GET /api/upload/state`
+- Returns current payload-side upload lock state.
+
+Example:
+
+```bash
+curl -sS "http://<ps5-ip>:8904/api/upload/state"
+```
+
+### Upload Lock Acquire/Release
+
+- `POST /api/upload/lock?action=acquire&owner=<client-id>&path=/...`
+- `POST /api/upload/lock?action=release&owner=<client-id>`
+- Notes:
+  - Acquire returns `200` with JSON `acquired=true|false`.
+  - Release only clears lock when owner matches active lock owner.
+
+Examples:
+
+```bash
+curl -sS -X POST \
+  "http://<ps5-ip>:8904/api/upload/lock?action=acquire&owner=tab-a&path=/data/games"
+```
+
+```bash
+curl -sS -X POST \
+  "http://<ps5-ip>:8904/api/upload/lock?action=release&owner=tab-a"
 ```
 
 ### Download File
@@ -303,7 +343,8 @@ These are intended for integration test control, not production use.
 - Not found: `404`
 - Method not allowed (debug non-GET): `405`
 - Missing upload length: `411`
-- Path conflicts / destination exists cases: `409` or `500` depending syscall error
+- Destination exists (for move/copy): `409`
+- Upload lock busy: `423`
 
 ## Related Docs
 

@@ -130,6 +130,26 @@ This is size-based resume, not hash-based.
 - prompts before overwriting existing files
 - lets you skip per file
 
+## What happens if multiple tabs or devices try to upload at the same time?
+
+PS5Drive now uses a payload-side upload lock.
+
+- only one uploader can hold the lock at a time
+- other tabs/devices see that upload is active and their upload start is blocked
+- lock state is shared through API health/state, so a newly opened page can see it
+
+## How should I upload very large datasets (for example 80-100 GB or 200k files)?
+
+Use batches instead of one giant browser selection.
+
+- split into smaller chunks (for example 5k-20k files per batch)
+- upload one batch at a time
+- if interrupted, reselect that batch and use `Resume`
+- prefer larger archive/file chunks when practical (huge file counts are slower than fewer larger files)
+
+The web UI warns for very large queues to avoid browser instability and guide batching decisions.
+For heavy upload-focused workflows, prefer `PS5Upload` (linked in README).
+
 ## What is the `Games` tab for?
 
 The `Games` tab scans directories for likely game folders.

@@ -165,6 +165,12 @@ class Ps5DriveRemoteTests(unittest.TestCase):
         self.assertIn("id=\"overwriteAllBtn\"", text)
         self.assertIn("Overwrite: Ask", text)
         self.assertIn("id=\"queueList\"", text)
+        self.assertIn("const UPLOAD_WARN_FILE_COUNT=20000;", text)
+        self.assertIn("const UPLOAD_BLOCK_FILE_COUNT=0;", text)
+        self.assertIn("function shouldAcceptLargeSelection(", text)
+        self.assertIn("function acquireUploadLock(", text)
+        self.assertIn("/api/upload/state", text)
+        self.assertIn("/api/upload/lock", text)
         self.assertIn("id=\"uploadStatusMain\"", text)
         self.assertIn("id=\"uploadStatusDetail\"", text)
         self.assertIn("id=\"uploadStatusFile\"", text)
@@ -302,6 +308,9 @@ class Ps5DriveRemoteTests(unittest.TestCase):
         self.assertIn(str(health.get("security_mode", "")), ("secure", "unsecure"))
         if str(health.get("security_mode", "")) == "secure":
             self.assertTrue(bool(health.get("auth_enabled", False)))
+        self.assertFalse(bool(health.get("upload_lock_busy", False)))
+        self.assertEqual(str(health.get("upload_lock_owner", "")), "")
+        self.assertEqual(str(health.get("upload_lock_path", "")), "")
 
     def test_web_port_api_health(self) -> None:
         status, _, body = self._web_request("GET", "/api/health")

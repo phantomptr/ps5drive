@@ -142,6 +142,9 @@ class Ps5DriveIntegrationTests(unittest.TestCase):
         self.assertTrue(payload["debug_enabled"])
         self.assertEqual(payload["security_mode"], "unsecure")
         self.assertFalse(bool(payload["auth_enabled"]))
+        self.assertFalse(bool(payload["upload_lock_busy"]))
+        self.assertEqual(str(payload.get("upload_lock_owner", "")), "")
+        self.assertEqual(str(payload.get("upload_lock_path", "")), "")
 
     def test_web_port_api_health(self) -> None:
         status, _, body = self.web_request("GET", "/api/health")
@@ -187,6 +190,12 @@ class Ps5DriveIntegrationTests(unittest.TestCase):
         self.assertIn("id=\"overwriteAllBtn\"", text)
         self.assertIn("Overwrite: Ask", text)
         self.assertIn("id=\"queueList\"", text)
+        self.assertIn("const UPLOAD_WARN_FILE_COUNT=20000;", text)
+        self.assertIn("const UPLOAD_BLOCK_FILE_COUNT=0;", text)
+        self.assertIn("function shouldAcceptLargeSelection(", text)
+        self.assertIn("function acquireUploadLock(", text)
+        self.assertIn("/api/upload/state", text)
+        self.assertIn("/api/upload/lock", text)
         self.assertIn("id=\"uploadStatusMain\"", text)
         self.assertIn("id=\"uploadStatusDetail\"", text)
         self.assertIn("id=\"uploadStatusFile\"", text)
@@ -272,6 +281,68 @@ class Ps5DriveIntegrationTests(unittest.TestCase):
         for locale in expected_locales:
             keys = set(re.findall(r"([a-z_]+):'", locale_block(locale)))
             self.assertEqual(keys, base_keys, f"locale key mismatch for {locale}")
+
+    def test_upload_lock_flow(self) -> None:
+        owner_a = "owner-a"
+        owner_b = "owner-b"
+        target_a = "/cases/lock/a.txt"
+        target_b = "/cases/lock/b.txt"
+
+        status, _, body = self.api_request(
+            "POST",
+            f"/api/upload/lock?action=acquire&owner={self._q(owner_a)}&path={self._q('/cases/lock')}",
+        )
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertTrue(bool(payload["acquired"]))
+        self.assertTrue(bool(payload["upload_lock_busy"]))
+        self.assertEqual(str(payload.get("upload_lock_owner", "")), owner_a)
+
+        status, _, body = self.api_request(
+            "POST",
+            f"/api/upload/lock?action=acquire&owner={self._q(owner_b)}&path={self._q('/cases/lock')}",
+        )
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertFalse(bool(payload["acquired"]))
+        self.assertTrue(bool(payload["upload_lock_busy"]))
+        self.assertEqual(str(payload.get("upload_lock_owner", "")), owner_a)
+
+        status, _, body = self.api_request(
+            "PUT",
+            f"/api/upload?path={self._q(target_b)}&owner={self._q(owner_b)}",
+            body=b"blocked",
+            headers={"Content-Length": "7", "Content-Type": "application/octet-stream"},
+        )
+        self.assertEqual(status, 423)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertTrue(bool(payload["upload_lock_busy"]))
+        self.assertEqual(str(payload.get("upload_lock_owner", "")), owner_a)
+
+        status, _, body = self.api_request(
+            "PUT",
+            f"/api/upload?path={self._q(target_a)}&owner={self._q(owner_a)}",
+            body=b"ok",
+            headers={"Content-Length": "2", "Content-Type": "application/octet-stream"},
+        )
+        self.assertEqual(status, 200)
+
+        status, _, body = self.api_request(
+            "POST",
+            f"/api/upload/lock?action=release&owner={self._q(owner_a)}",
+        )
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertTrue(bool(payload["released"]))
+        self.assertFalse(bool(payload["upload_lock_busy"]))
+
+        status, _, body = self.api_request(
+            "PUT",
+            f"/api/upload?path={self._q(target_b)}&owner={self._q(owner_b)}",
+            body=b"free",
+            headers={"Content-Length": "4", "Content-Type": "application/octet-stream"},
+        )
+        self.assertEqual(status, 200)
 
     def test_web_logo_assets_served(self) -> None:
         status, headers, body = self.web_request("GET", "/assets/logo-light.svg")
