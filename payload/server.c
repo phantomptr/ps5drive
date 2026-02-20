@@ -2447,6 +2447,7 @@ static int serve_web_index(server_ctx_t *ctx, int client_fd) {
                          "<button id=\"uploadConfigBtn\" class=\"btn-main sloth-btn-main\">Upload Config</button>"
                          "<button id=\"resetConfigBtn\" class=\"btn-warn sloth-btn-warn\">Reset Config</button>"
                          "<a class=\"btn-link sloth-link btn-coffee sloth-btn-coffee\" href=\"https://ko-fi.com/B0B81S0WUA\" target=\"_blank\" rel=\"noopener noreferrer\"><span id=\"coffeeText\">Buy Me a Coffee</span></a>"
+                         "<a class=\"btn-link sloth-link btn-info sloth-btn-info\" href=\"https://discord.com/invite/fzK3xddtrM\" target=\"_blank\" rel=\"noopener noreferrer\"><span id=\"discordText\">Discord</span></a>"
                          "<button id=\"stopBtn\" class=\"btn-danger sloth-btn-danger\">Stop PS5Drive</button></div></div></div>",
                          ctx->cfg.version ? ctx->cfg.version : "dev", ctx->cfg.api_port, ctx->cfg.debug_port,
                          auth_is_enabled(ctx) ? "mode-chip-secure" : "mode-chip-insecure",

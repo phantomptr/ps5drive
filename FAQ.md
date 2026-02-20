@@ -6,6 +6,11 @@
 
 ## What is PS5Drive?
 
+PS5Drive turns your console into a browser-powered transfer dock, so apps, homebrew, and files move in fast and stay easy to manage.
+
+If you want a more comprehensive upload-focused tool, use **PS5Upload**:
+`https://github.com/phantomptr/ps5upload`
+
 `ps5drive.elf` is a PS5 payload with:
 
 - Web UI on `8903`
@@ -15,14 +20,7 @@
 
 ## How do I build it?
 
-```bash
-export PS5_PAYLOAD_SDK=/path/to/sdk
-make
-```
-
-Output files:
-
-- `payload/ps5drive.elf`
+See [docs/BUILD_AND_TEST.md](docs/BUILD_AND_TEST.md) for PS5/PS4 build steps and test targets.
 
 ## How do I send the payload?
 
@@ -139,38 +137,11 @@ After scan, use `Open` on a row to jump to that path in the file browser.
 
 ## How do I run integration tests?
 
-Local (unit + mock integration):
-
-```bash
-make host
-make test-unit
-make test-integration-mock
-make test
-```
-
-Real PS5:
-
-```bash
-make test-integration-real PS5_IP=192.168.137.2 PS5_LOADER_PORT=9021
-# alias:
-make test-remote PS5_IP=192.168.137.2 PS5_LOADER_PORT=9021
-```
+See [docs/BUILD_AND_TEST.md](docs/BUILD_AND_TEST.md).
 
 ## How do I run heavy stress tests?
 
-Host stress:
-
-```bash
-PS5DRIVE_STRESS=1 make test-integration-mock
-```
-
-Remote stress:
-
-```bash
-PS5DRIVE_REMOTE_STRESS=1 make test-integration-real PS5_IP=192.168.137.2 PS5_LOADER_PORT=9021
-```
-
-You can tune deep/wide/large-file settings via env vars in `README.md`.
+See [docs/BUILD_AND_TEST.md](docs/BUILD_AND_TEST.md).
 
 ## What is the debug port used for?
 
