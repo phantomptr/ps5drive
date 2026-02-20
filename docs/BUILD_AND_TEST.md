@@ -45,10 +45,14 @@ make both
 
 ## Test Targets
 
-- `make test-unit`: unit tests only (`tests/unit/`)
-- `make test-integration-mock`: host-backed integration tests (`tests/integration/mock/`)
-- `make test`: unit + mock integration (default CI path)
-- `make test-integration-real`: real console integration (`tests/integration/real/`)
+- `make test-common`: common/unit tests (`tests/common/unit/`)
+- `make test-unit`: alias of `make test-common`
+- `make test-ps5-mock`: PS5 mock integration tests (`tests/ps5/integration/mock/`)
+- `make test-ps4-mock`: PS4 mock integration tests (`tests/ps4/integration/mock/`)
+- `make test-integration-mock`: PS5 + PS4 mock integration groups
+- `make test`: common + mock integration (default CI path)
+- `make test-ps5-real`: PS5 real console integration (`tests/ps5/integration/real/`)
+- `make test-integration-real`: alias of `make test-ps5-real`
 - `make test-remote`: alias of `make test-integration-real`
 
 CI (`.github/workflows/ci.yml`) runs only unit + mock integration tests.
@@ -91,4 +95,3 @@ Stress tuning vars:
 - `PS5DRIVE_STRESS_WIDE_FILES` / `PS5DRIVE_REMOTE_STRESS_WIDE_FILES`
 - `PS5DRIVE_STRESS_SMALL_BYTES` / `PS5DRIVE_REMOTE_STRESS_SMALL_BYTES`
 - `PS5DRIVE_STRESS_LIST_PAGE` / `PS5DRIVE_REMOTE_STRESS_LIST_PAGE`
-

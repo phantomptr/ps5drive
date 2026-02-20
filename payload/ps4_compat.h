@@ -301,6 +301,7 @@ __BEGIN_DECLS
 void ps4_sdk_init(void);
 
 int ps4_close(int fd);
+int ps4_kill(pid_t pid, int sig);
 int ps4_socket(int domain, int type, int protocol);
 int ps4_connect(int fd, const struct sockaddr *addr, socklen_t len);
 int ps4_bind(int fd, const struct sockaddr *addr, socklen_t len);
@@ -334,6 +335,7 @@ __END_DECLS
 
 #if !defined(PS5DRIVE_PS4_COMPAT_IMPL)
 #define close ps4_close
+#define kill ps4_kill
 #define socket ps4_socket
 #define connect ps4_connect
 #define bind ps4_bind

@@ -6,3 +6,5 @@ payload/*.elf
 # Python cache artifacts
 __pycache__/
 *.py[cod]
+
+temp/

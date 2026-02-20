@@ -1,5 +1,6 @@
 #define PS5DRIVE_PS4_COMPAT_IMPL 1
 #include "ps4_compat.h"
+#include "config.h"
 
 extern int libc;
 
@@ -42,10 +43,17 @@ int ps4_close(int fd) {
     return close(fd);
 }
 
+int ps4_kill(pid_t pid, int sig) {
+    int rc = (int)syscall(37, pid, sig);
+    if (rc == 0) return 0;
+    if (errno == ENOSYS) return kill(pid, sig);
+    return rc;
+}
+
 int ps4_socket(int domain, int type, int protocol) {
     ps4_sdk_init();
     if (!sceNetSocket) return -1;
-    return sceNetSocket("ps5drive", domain, type, protocol);
+    return sceNetSocket(PS5DRIVE_BRAND_LOWER, domain, type, protocol);
 }
 
 int ps4_connect(int fd, const struct sockaddr *addr, socklen_t len) {
@@ -165,7 +173,9 @@ char *ps4_getenv(const char *name) {
 }
 
 int ps4_access(const char *path, int mode) {
-    (void)mode;
+    int rc = (int)syscall(33, path, mode);
+    if (rc == 0) return 0;
+    if (errno != ENOSYS) return -1;
     struct stat st;
     return stat(path, &st) == 0 ? 0 : -1;
 }

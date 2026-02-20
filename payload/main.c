@@ -120,11 +120,23 @@ static void build_basic_auth_header(char *out, size_t out_len) {
     snprintf(out, out_len, "Authorization: Basic %s\r\n", encoded);
 }
 
+static void append_state_filename(char *dst, size_t dst_len, const char *dir, const char *name) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    if (!dir || !name) return;
+    size_t dlen = strlen(dir);
+    size_t nlen = strlen(name);
+    if (dlen + 1 + nlen + 1 > dst_len) return;
+    memcpy(dst, dir, dlen);
+    dst[dlen] = '/';
+    memcpy(dst + dlen + 1, name, nlen + 1);
+}
+
 static void recompute_runtime_paths(runtime_cfg_t *cfg) {
     if (!cfg) return;
-    snprintf(cfg->config_path, sizeof(cfg->config_path), "%s/config.ini", cfg->state_dir);
-    snprintf(cfg->pid_file, sizeof(cfg->pid_file), "%s/payload.pid", cfg->state_dir);
-    snprintf(cfg->server_pid_file, sizeof(cfg->server_pid_file), "%s/server.pid", cfg->state_dir);
+    append_state_filename(cfg->config_path, sizeof(cfg->config_path), cfg->state_dir, "config.ini");
+    append_state_filename(cfg->pid_file, sizeof(cfg->pid_file), cfg->state_dir, "payload.pid");
+    append_state_filename(cfg->server_pid_file, sizeof(cfg->server_pid_file), cfg->state_dir, "server.pid");
 }
 
 static int mkdir_recursive(const char *path) {
@@ -148,8 +160,8 @@ static int write_default_config_ini(const char *path) {
     if (!path || !*path) return -1;
     FILE *fp = fopen(path, "w");
     if (!fp) return -1;
+    fprintf(fp, "# %s persistent config\n", PS5DRIVE_BRAND);
     fprintf(fp,
-            "# PS5Drive persistent config\n"
             "[security]\n"
             "mode=unsecure\n"
             "username=\n"
@@ -199,17 +211,31 @@ static void load_security_config(runtime_cfg_t *cfg) {
     }
 }
 
+#if !defined(PS5DRIVE_PS4_BUILD)
 static void copy_env_string(const char *name, const char *fallback, char *dst, size_t dst_len) {
     const char *src = getenv(name);
     if (!src || !*src) src = fallback;
     snprintf(dst, dst_len, "%s", src);
 }
+#endif
 
 static void load_runtime_cfg(runtime_cfg_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
+#if defined(PS5DRIVE_PS4_BUILD)
+    const char *state_dir = getenv("PS4DRIVE_STATE_DIR");
+    if (!state_dir || !*state_dir) state_dir = getenv("PS5DRIVE_STATE_DIR");
+    if (!state_dir || !*state_dir) state_dir = PS5DRIVE_STATE_DIR;
+    snprintf(cfg->state_dir, sizeof(cfg->state_dir), "%s", state_dir);
+
+    const char *root_override = getenv("PS4DRIVE_ROOT_OVERRIDE");
+    if (!root_override || !*root_override) root_override = getenv("PS5DRIVE_ROOT_OVERRIDE");
+    if (!root_override || !*root_override) root_override = PS5DRIVE_ROOT_DIR;
+    snprintf(cfg->root_dir, sizeof(cfg->root_dir), "%s", root_override);
+#else
     copy_env_string("PS5DRIVE_STATE_DIR", PS5DRIVE_STATE_DIR, cfg->state_dir, sizeof(cfg->state_dir));
     /* Avoid inheriting generic PS5DRIVE_ROOT from other payload ecosystems by default. */
     copy_env_string("PS5DRIVE_ROOT_OVERRIDE", PS5DRIVE_ROOT_DIR, cfg->root_dir, sizeof(cfg->root_dir));
+#endif
     recompute_runtime_paths(cfg);
     cfg->web_port = parse_env_int("PS5DRIVE_WEB_PORT", PS5DRIVE_WEB_PORT);
     cfg->api_port = parse_env_int("PS5DRIVE_API_PORT", PS5DRIVE_API_PORT);
@@ -597,10 +623,12 @@ int main(void) {
 
     if (mkdir_recursive(g_cfg.state_dir) != 0 || !state_dir_usable(g_cfg.state_dir)) {
         if (access("/tmp", R_OK | W_OK | X_OK) == 0) {
-            snprintf(g_cfg.state_dir, sizeof(g_cfg.state_dir), "/tmp/ps5drive");
+            snprintf(g_cfg.state_dir, sizeof(g_cfg.state_dir), "%s", PS5DRIVE_TMP_STATE_DIR);
             (void)mkdir_recursive(g_cfg.state_dir);
             recompute_runtime_paths(&g_cfg);
-            notify_info(PS5DRIVE_TITLE, "State dir unavailable; using /tmp/ps5drive.");
+            char msg[160];
+            snprintf(msg, sizeof(msg), "State dir unavailable; using %s.", PS5DRIVE_TMP_STATE_DIR);
+            notify_info(PS5DRIVE_TITLE, msg);
         }
     }
     load_security_config(&g_cfg);
@@ -608,7 +636,7 @@ int main(void) {
     g_pid_tracking_enabled = state_dir_usable(g_cfg.state_dir);
     if (!g_pid_tracking_enabled) {
         if (access("/tmp", R_OK | W_OK | X_OK) == 0) {
-            snprintf(g_cfg.state_dir, sizeof(g_cfg.state_dir), "/tmp/ps5drive");
+            snprintf(g_cfg.state_dir, sizeof(g_cfg.state_dir), "%s", PS5DRIVE_TMP_STATE_DIR);
             (void)mkdir_recursive(g_cfg.state_dir);
             recompute_runtime_paths(&g_cfg);
             load_security_config(&g_cfg);

@@ -81,7 +81,11 @@ PS4_BUILD_MODE := libPS4
 endif
 endif
 
-.PHONY: all ps5 ps4 both payload payload-ps5 payload-ps4 host test test-unit test-integration-mock test-integration-real test-remote clean info
+.PHONY: all ps5 ps4 both payload payload-ps5 payload-ps4 host \
+	test test-common test-unit \
+	test-ps5-mock test-ps4-mock test-integration-mock \
+	test-ps5-real test-integration-real test-remote \
+	clean info
 
 all: ps5
 
@@ -127,14 +131,23 @@ build/host/%.o: payload/%.c $(COMMON_HDRS) VERSION
 
 test: test-unit test-integration-mock
 
-test-unit:
-	python3 -m unittest discover -v -s tests/unit -p 'test_*.py'
+test-common:
+	python3 -m unittest discover -v -s tests/common/unit -p 'test_*.py'
 
-test-integration-mock: host
-	python3 -m unittest discover -v -s tests/integration/mock -p 'test_*.py'
+test-unit: test-common
 
-test-integration-real: payload-ps5
-	python3 -m unittest discover -v -s tests/integration/real -p 'test_*.py'
+test-ps5-mock: host
+	python3 -m unittest discover -v -s tests/ps5/integration/mock -p 'test_*.py'
+
+test-ps4-mock: host
+	python3 -m unittest discover -v -s tests/ps4/integration/mock -p 'test_*.py'
+
+test-integration-mock: test-ps5-mock test-ps4-mock
+
+test-ps5-real: payload-ps5
+	python3 -m unittest discover -v -s tests/ps5/integration/real -p 'test_*.py'
+
+test-integration-real: test-ps5-real
 
 test-remote: test-integration-real
 

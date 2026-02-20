@@ -1,10 +1,26 @@
 #ifndef PS5DRIVE_CONFIG_H
 #define PS5DRIVE_CONFIG_H
 
+#if defined(PS5DRIVE_PS4_BUILD)
+#define PS5DRIVE_TITLE "PS4 Drive Payload"
+#define PS5DRIVE_BRAND "PS4Drive"
+#define PS5DRIVE_BRAND_LOWER "ps4drive"
+#define PS5DRIVE_STATE_DIR "/data/ps4drive"
+#define PS5DRIVE_TMP_STATE_DIR "/tmp/ps4drive"
+#define PS5DRIVE_RESET_USER_HEADER "X-PS4Drive-Reset-User"
+#define PS5DRIVE_RESET_PASS_HEADER "X-PS4Drive-Reset-Pass"
+#else
 #define PS5DRIVE_TITLE "PS5 Drive Payload"
+#define PS5DRIVE_BRAND "PS5Drive"
+#define PS5DRIVE_BRAND_LOWER "ps5drive"
 #define PS5DRIVE_STATE_DIR "/data/ps5drive"
-#define PS5DRIVE_PID_FILE "/data/ps5drive/payload.pid"
-#define PS5DRIVE_SERVER_PID_FILE "/data/ps5drive/server.pid"
+#define PS5DRIVE_TMP_STATE_DIR "/tmp/ps5drive"
+#define PS5DRIVE_RESET_USER_HEADER "X-PS5Drive-Reset-User"
+#define PS5DRIVE_RESET_PASS_HEADER "X-PS5Drive-Reset-Pass"
+#endif
+
+#define PS5DRIVE_PID_FILE PS5DRIVE_STATE_DIR "/payload.pid"
+#define PS5DRIVE_SERVER_PID_FILE PS5DRIVE_STATE_DIR "/server.pid"
 #define PS5DRIVE_ROOT_DIR "/"
 #define PS5DRIVE_WEB_PORT 8903
 #define PS5DRIVE_API_PORT 8904

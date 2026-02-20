@@ -675,6 +675,55 @@ class Ps5DriveIntegrationTests(unittest.TestCase):
         self.assertIn("image/png", headers.get("Content-Type", ""))
         self.assertEqual(body, b"\x89PNG\r\n\x1a\n")
 
+    def test_games_scan_installed_title_uses_appmeta_fallbacks(self) -> None:
+        title_id = "CUSA54321"
+        title_root = f"/user/app/{title_id}"
+
+        status, _, _ = self.api_request(
+            "PUT",
+            f"/api/upload?path={self._q(title_root + '/eboot.bin')}",
+            body=b"x",
+            headers={"Content-Length": "1", "Content-Type": "application/octet-stream"},
+        )
+        self.assertEqual(status, 200)
+
+        status, _, _ = self.api_request(
+            "PUT",
+            f"/api/upload?path={self._q('/system_data/priv/appmeta/' + title_id + '/param.sfo')}",
+            body=b"PARAM",
+            headers={"Content-Length": "5", "Content-Type": "application/octet-stream"},
+        )
+        self.assertEqual(status, 200)
+
+        status, _, _ = self.api_request(
+            "PUT",
+            f"/api/upload?path={self._q('/user/appmeta/' + title_id + '/icon0.png')}",
+            body=b"\x89PNG\r\n\x1a\n",
+            headers={"Content-Length": "8", "Content-Type": "application/octet-stream"},
+        )
+        self.assertEqual(status, 200)
+
+        status, _, body = self.api_request(
+            "GET",
+            f"/api/games/scan?path={self._q('/user/app')}&max_depth=3&max_dirs=500",
+        )
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertTrue(payload.get("ok"))
+
+        row = next((g for g in payload.get("games", []) if g.get("path") == title_root), None)
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.get("title_id"), title_id)
+        self.assertEqual(row.get("platform"), "PS4")
+        self.assertTrue(bool(row.get("has_param_sfo")))
+        self.assertTrue(bool(row.get("has_cover")))
+
+        status, headers, body = self.api_request("GET", f"/api/games/cover?path={self._q(title_root)}")
+        self.assertEqual(status, 200)
+        self.assertIn("image/png", headers.get("Content-Type", ""))
+        self.assertEqual(body, b"\x89PNG\r\n\x1a\n")
+
     def test_upload_and_download_file(self) -> None:
         target = "/cases/upload/hello.txt"
         blob = b"hello from integration tests\n"
