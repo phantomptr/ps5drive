@@ -28,7 +28,13 @@ Use your loader IP/port:
 
 ```bash
 nc -N -w 1 192.168.137.2 9021 < payload/ps5drive.elf
+nc -N -w 1 192.168.137.2 9090 < payload/ps4drive.elf
 ```
+
+Common defaults:
+
+- PS5 loaders: `9021`
+- PS4 hosts: often `9090` (can vary by host)
 
 If your `nc` flavor does not support `-N`, keep `-w 1` to avoid hanging too long.
 

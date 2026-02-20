@@ -39,7 +39,7 @@ For a more comprehensive upload-focused tool, use **PS5Upload**:
 
 ## Send the Payload
 
-Use your loader IP/port (typical loader port is `9021`).
+Use your loader IP/port. The port depends on your loader/exploit host.
 
 PS5 payload:
 
@@ -50,8 +50,13 @@ nc -N -w 1 <console-ip> 9021 < payload/ps5drive.elf
 PS4 payload:
 
 ```bash
-nc -N -w 1 <console-ip> 9021 < payload/ps4drive.elf
+nc -N -w 1 <console-ip> 9090 < payload/ps4drive.elf
 ```
+
+Notes:
+
+- PS5 loaders are commonly `9021`.
+- PS4 hosts are often `9090` (some setups use other ports).
 
 If your `nc` variant does not support `-N`, keep `-w 1` to avoid hanging.
 
@@ -107,16 +112,19 @@ You can also manage config directly in the UI with:
 - Stop from API: `POST /api/stop`
 - Loading the payload again is reload-safe and replaces previous instances.
 
-## Support
+## License
 
-- Discord: `https://discord.com/invite/fzK3xddtrM`
-- Issues: `https://github.com/phantomptr/ps5drive/issues`
-- Donation: `https://ko-fi.com/B0B81S0WUA`
+GNU General Public License v3.0 (GPLv3).
+Free to use, free to modify.
 
 ## Credits
 
-Created by [PhantomPtr](https://github.com/phantomptr), with feedback and testing from the console homebrew community.
+Created by **PhantomPtr**.
+- [Follow me on X (@phantomptr)](https://x.com/phantomptr)
 
-## License
+## Support
 
-See [LICENSE](LICENSE).
+If you find this tool useful, consider buying me a coffee.
+
+- Ko-fi: `https://ko-fi.com/B0B81S0WUA`
+- Discord server: `https://discord.gg/fzK3xddtrM`
