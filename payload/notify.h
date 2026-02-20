@@ -1,7 +1,14 @@
 #ifndef PS5DRIVE_NOTIFY_H
 #define PS5DRIVE_NOTIFY_H
 
+#if defined(PS5DRIVE_PS4_BUILD)
+#ifndef __BEGIN_DECLS
+#define __BEGIN_DECLS
+#define __END_DECLS
+#endif
+#else
 #include <sys/cdefs.h>
+#endif
 
 __BEGIN_DECLS
 

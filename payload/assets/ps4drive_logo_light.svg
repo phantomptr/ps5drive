@@ -1,0 +1,26 @@
+<svg width="256" height="60" viewBox="0 0 256 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g stroke="#0B1220" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Chip body -->
+    <rect x="4" y="10" width="40" height="40" rx="8"></rect>
+    <rect x="16" y="22" width="16" height="16" rx="2"></rect>
+    
+    <!-- Pins -->
+    <line x1="14" y1="4" x2="14" y2="10"></line>
+    <line x1="24" y1="4" x2="24" y2="10"></line>
+    <line x1="34" y1="4" x2="34" y2="10"></line>
+
+    <line x1="14" y1="50" x2="14" y2="56"></line>
+    <line x1="24" y1="50" x2="24" y2="56"></line>
+    <line x1="34" y1="50" x2="34" y2="56"></line>
+
+    <line x1="0" y1="24" x2="4" y2="24"></line>
+    <line x1="0" y1="34" x2="4" y2="34"></line>
+
+    <line x1="44" y1="24" x2="48" y2="24"></line>
+    <line x1="44" y1="34" x2="48" y2="34"></line>
+  </g>
+
+  <text x="60" y="38" fill="#0B1220" font-family="Inter, Helvetica, Arial, sans-serif" font-size="28" font-weight="600">
+    PS4Drive
+  </text>
+</svg>
