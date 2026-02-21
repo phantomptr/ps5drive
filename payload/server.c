@@ -26,7 +26,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#if defined(__linux__)
+#if defined(__linux__) || defined(PS5DRIVE_TARGET_PS4)
 #include <sys/statvfs.h>
 #else
 #include <sys/mount.h>
@@ -1222,7 +1222,7 @@ static void query_storage_space_gb(const char *path, double *free_gb, double *to
 #if defined(PS5DRIVE_PS4_BUILD)
     unsigned long long free_bytes = 0;
     unsigned long long total_bytes = 0;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(PS5DRIVE_TARGET_PS4)
     struct statvfs vfs;
     if (statvfs(path, &vfs) != 0) return;
     unsigned long long free_bytes = (unsigned long long)vfs.f_bavail * (unsigned long long)vfs.f_frsize;
