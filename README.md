@@ -13,6 +13,8 @@
 
 PS5Drive turns your console into a browser-powered transfer dock, so apps, homebrew, and files move in fast and stay easy to manage.
 
+Current stable release: **v1.0.0** (2026-02-21).
+
 Quick links:
 
 - [FAQ](FAQ.md)
