@@ -1,30 +1,26 @@
 name: Release
+permissions:
+  contents: write
 
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (example: v1.2.3)'
+        description: 'Release tag (example: v1.0.0)'
         required: true
         type: string
 
 jobs:
-  github-release:
-    name: Build Payloads and Create GitHub Release
-    runs-on: [self-hosted, linux]
-    permissions:
-      contents: write
-
+  build-payloads:
+    name: Build PS5 + PS4 Payloads
+    runs-on: ubuntu-24.04
+    env:
+      PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
+      PS4_PAYLOAD_SDK: /opt/ps4-payload-sdk
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-
       - name: Resolve release tag
         id: tag
         shell: bash
@@ -33,71 +29,121 @@ jobs:
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             TAG="${{ inputs.tag }}"
-            git fetch --tags --force
-            if ! git rev-parse "${TAG}^{tag}" >/dev/null 2>&1 && ! git rev-parse "${TAG}^{commit}" >/dev/null 2>&1; then
-              echo "Tag '${TAG}' does not exist in this repository." >&2
-              exit 1
-            fi
           else
             TAG="${GITHUB_REF_NAME}"
           fi
 
-          VERSION="${TAG#v}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid tag: $TAG" >&2
+            exit 1
+          fi
 
-      - name: Extract release notes from changelog
-        id: notes
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld unzip zip git build-essential
+
+      - name: Download PS5 Payload SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L -o /tmp/ps5-payload-sdk.zip \
+            https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
+          sudo rm -rf "$PS5_PAYLOAD_SDK"
+          sudo unzip -q /tmp/ps5-payload-sdk.zip -d /opt
+
+      - name: Download PS4 Payload SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf "$PS4_PAYLOAD_SDK"
+          sudo git clone --depth 1 https://github.com/Scene-Collective/ps4-payload-sdk.git "$PS4_PAYLOAD_SDK"
+
+      - name: Build payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          make clean
+          make both
+          test -s payload/ps5drive.elf
+          test -s payload/ps4drive.elf
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp payload/ps5drive.elf dist/ps5drive.elf
+          cp payload/ps4drive.elf dist/ps4drive.elf
+
+      - name: Upload payload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload-artifacts
+          path: |
+            dist/ps5drive.elf
+            dist/ps4drive.elf
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    needs:
+      - build-payloads
+    steps:
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Build release notes from changelog
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="${{ steps.tag.outputs.version }}"
+          tag="${{ steps.tag.outputs.tag }}"
+          version="${tag#v}"
 
-          awk -v version="$VERSION" '
+          awk -v version="$version" '
             $0 ~ "^## \\[" version "\\]" { in_section=1; next }
             in_section && /^## \[/ { exit }
             in_section { print }
           ' CHANGELOG.md > release_notes.md
 
-          # Remove leading/trailing blank lines for cleaner release notes.
           sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' release_notes.md
           sed -i '/./,$!d' release_notes.md
 
           if [[ ! -s release_notes.md ]]; then
-            echo "No changelog entry found for ${VERSION} in CHANGELOG.md" >&2
-            echo "Expected section header: ## [${VERSION}] - YYYY-MM-DD" >&2
+            echo "No changelog entry found for ${version} in CHANGELOG.md" >&2
+            echo "Expected section header: ## [${version}] - YYYY-MM-DD" >&2
             exit 1
           fi
 
-      - name: Build PS5 + PS4 payloads
-        shell: bash
-        env:
-          PS5_PAYLOAD_SDK: ${{ vars.PS5_PAYLOAD_SDK }}
-          PS4_PAYLOAD_SDK: ${{ vars.PS4_PAYLOAD_SDK }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${PS5_PAYLOAD_SDK:-}" ]]; then
-            echo "Repository variable PS5_PAYLOAD_SDK is required." >&2
-            exit 1
-          fi
-          if [[ -z "${PS4_PAYLOAD_SDK:-}" ]]; then
-            echo "Repository variable PS4_PAYLOAD_SDK is required." >&2
-            exit 1
-          fi
-          if [[ ! -d "${PS5_PAYLOAD_SDK}" ]]; then
-            echo "PS5_PAYLOAD_SDK path does not exist on runner: ${PS5_PAYLOAD_SDK}" >&2
-            exit 1
-          fi
-          if [[ ! -d "${PS4_PAYLOAD_SDK}" ]]; then
-            echo "PS4_PAYLOAD_SDK path does not exist on runner: ${PS4_PAYLOAD_SDK}" >&2
-            exit 1
-          fi
-
-          make clean
-          make both
-          ls -lh payload/ps5drive.elf payload/ps4drive.elf
+      - name: Download payload artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: payload-artifacts
+          path: dist
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -108,5 +154,5 @@ jobs:
           generate_release_notes: false
           fail_on_unmatched_files: true
           files: |
-            payload/ps5drive.elf
-            payload/ps4drive.elf
+            dist/ps5drive.elf
+            dist/ps4drive.elf
