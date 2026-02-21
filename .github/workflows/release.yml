@@ -14,8 +14,8 @@ on:
         type: string
 
 jobs:
-  build-payloads:
-    name: Build PS5 + PS4 Payloads
+  release:
+    name: Build and Publish Release
     runs-on: ubuntu-24.04
     env:
       PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
@@ -39,6 +39,7 @@ jobs:
           fi
 
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,13 +52,13 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang lld unzip zip git build-essential
+          sudo apt-get install -y clang lld unzip zip build-essential
 
       - name: Download PS5 Payload SDK
         shell: bash
         run: |
           set -euo pipefail
-          curl -L -o /tmp/ps5-payload-sdk.zip \
+          curl -fL -o /tmp/ps5-payload-sdk.zip \
             https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
           sudo rm -rf "$PS5_PAYLOAD_SDK"
           sudo unzip -q /tmp/ps5-payload-sdk.zip -d /opt
@@ -66,43 +67,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          curl -fL -o /tmp/ps4-payload-sdk.zip \
+            https://github.com/ps4-payload-dev/sdk/releases/latest/download/ps4-payload-sdk.zip
           sudo rm -rf "$PS4_PAYLOAD_SDK"
+          sudo unzip -q /tmp/ps4-payload-sdk.zip -d /opt
 
-          # Prefer a packaged SDK if available, then fall back to source clone.
-          if curl -fL -o /tmp/ps4-payload-sdk.zip \
-            https://github.com/ps4-payload-dev/sdk/releases/latest/download/ps4-payload-sdk.zip; then
-            sudo unzip -q /tmp/ps4-payload-sdk.zip -d /opt
-          else
-            sudo git clone --depth 1 --recurse-submodules \
-              https://github.com/Scene-Collective/ps4-payload-sdk.git \
-              "$PS4_PAYLOAD_SDK"
-            sudo git -C "$PS4_PAYLOAD_SDK" submodule update --init --recursive
-          fi
-
-      - name: Validate PS4 SDK layout
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ -f "$PS4_PAYLOAD_SDK/toolchain/orbis.mk" || -f "$PS4_PAYLOAD_SDK/toolchain/ps4.mk" || -f "$PS4_PAYLOAD_SDK/orbis.mk" || -f "$PS4_PAYLOAD_SDK/ps4.mk" || -f "$PS4_PAYLOAD_SDK/libPS4/libPS4.a" ]]; then
-            if [[ -f "$PS4_PAYLOAD_SDK/ps4.h" || -f "$PS4_PAYLOAD_SDK/include/ps4.h" || -f "$PS4_PAYLOAD_SDK/libPS4/include/ps4.h" ]]; then
-              echo "PS4 SDK compatibility header found (ps4.h)."
-            else
-              echo "PS4 SDK compatibility header not found (ps4.h)." >&2
-              echo "Proceeding with fallback PS4 build mode (no PS5DRIVE_PS4_BUILD wrappers)." >&2
-            fi
-            exit 0
-          fi
-
-          echo "PS4 SDK layout invalid under: $PS4_PAYLOAD_SDK" >&2
-          echo "Expected one of:" >&2
-          echo "  toolchain/orbis.mk | toolchain/ps4.mk | orbis.mk | ps4.mk | libPS4/libPS4.a" >&2
-          echo "Directory listing for diagnosis:" >&2
-          ls -la "$PS4_PAYLOAD_SDK" >&2 || true
-          find "$PS4_PAYLOAD_SDK" -maxdepth 4 -type f \( -name 'orbis.mk' -o -name 'ps4.mk' -o -name 'libPS4.a' -o -name 'ps4.h' \) >&2 || true
-          exit 1
-
-      - name: Build payloads
+      - name: Build PS5 + PS4 payloads
         shell: bash
         run: |
           set -euo pipefail
@@ -111,53 +81,14 @@ jobs:
           test -s payload/ps5drive.elf
           test -s payload/ps4drive.elf
 
-      - name: Package release assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          cp payload/ps5drive.elf dist/ps5drive.elf
-          cp payload/ps4drive.elf dist/ps4drive.elf
-
-      - name: Upload payload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: payload-artifacts
-          path: |
-            dist/ps5drive.elf
-            dist/ps4drive.elf
-
-  release:
-    name: Create GitHub Release
-    runs-on: ubuntu-24.04
-    needs:
-      - build-payloads
-    steps:
-      - name: Resolve release tag
-        id: tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.tag.outputs.tag }}
-
       - name: Build release notes from changelog
         shell: bash
         run: |
           set -euo pipefail
 
-          tag="${{ steps.tag.outputs.tag }}"
-          version="${tag#v}"
+          VERSION="${{ steps.tag.outputs.version }}"
 
-          awk -v version="$version" '
+          awk -v version="$VERSION" '
             $0 ~ "^## \\[" version "\\]" { in_section=1; next }
             in_section && /^## \[/ { exit }
             in_section { print }
@@ -167,16 +98,10 @@ jobs:
           sed -i '/./,$!d' release_notes.md
 
           if [[ ! -s release_notes.md ]]; then
-            echo "No changelog entry found for ${version} in CHANGELOG.md" >&2
-            echo "Expected section header: ## [${version}] - YYYY-MM-DD" >&2
+            echo "No changelog entry found for ${VERSION} in CHANGELOG.md" >&2
+            echo "Expected section header: ## [${VERSION}] - YYYY-MM-DD" >&2
             exit 1
           fi
-
-      - name: Download payload artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: payload-artifacts
-          path: dist
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -187,5 +112,5 @@ jobs:
           generate_release_notes: false
           fail_on_unmatched_files: true
           files: |
-            dist/ps5drive.elf
-            dist/ps4drive.elf
+            payload/ps5drive.elf
+            payload/ps4drive.elf
