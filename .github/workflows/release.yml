@@ -13,8 +13,8 @@ on:
 
 jobs:
   github-release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
+    name: Build Payloads and Create GitHub Release
+    runs-on: [self-hosted, linux]
     permissions:
       contents: write
 
@@ -70,6 +70,35 @@ jobs:
             exit 1
           fi
 
+      - name: Build PS5 + PS4 payloads
+        shell: bash
+        env:
+          PS5_PAYLOAD_SDK: ${{ vars.PS5_PAYLOAD_SDK }}
+          PS4_PAYLOAD_SDK: ${{ vars.PS4_PAYLOAD_SDK }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${PS5_PAYLOAD_SDK:-}" ]]; then
+            echo "Repository variable PS5_PAYLOAD_SDK is required." >&2
+            exit 1
+          fi
+          if [[ -z "${PS4_PAYLOAD_SDK:-}" ]]; then
+            echo "Repository variable PS4_PAYLOAD_SDK is required." >&2
+            exit 1
+          fi
+          if [[ ! -d "${PS5_PAYLOAD_SDK}" ]]; then
+            echo "PS5_PAYLOAD_SDK path does not exist on runner: ${PS5_PAYLOAD_SDK}" >&2
+            exit 1
+          fi
+          if [[ ! -d "${PS4_PAYLOAD_SDK}" ]]; then
+            echo "PS4_PAYLOAD_SDK path does not exist on runner: ${PS4_PAYLOAD_SDK}" >&2
+            exit 1
+          fi
+
+          make clean
+          make both
+          ls -lh payload/ps5drive.elf payload/ps4drive.elf
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -77,3 +106,7 @@ jobs:
           name: ${{ steps.tag.outputs.tag }}
           body_path: release_notes.md
           generate_release_notes: false
+          fail_on_unmatched_files: true
+          files: |
+            payload/ps5drive.elf
+            payload/ps4drive.elf
