@@ -67,7 +67,34 @@ jobs:
         run: |
           set -euo pipefail
           sudo rm -rf "$PS4_PAYLOAD_SDK"
-          sudo git clone --depth 1 https://github.com/Scene-Collective/ps4-payload-sdk.git "$PS4_PAYLOAD_SDK"
+
+          # Prefer a packaged SDK if available, then fall back to source clone.
+          if curl -fL -o /tmp/ps4-payload-sdk.zip \
+            https://github.com/ps4-payload-dev/sdk/releases/latest/download/ps4-payload-sdk.zip; then
+            sudo unzip -q /tmp/ps4-payload-sdk.zip -d /opt
+          else
+            sudo git clone --depth 1 --recurse-submodules \
+              https://github.com/Scene-Collective/ps4-payload-sdk.git \
+              "$PS4_PAYLOAD_SDK"
+            sudo git -C "$PS4_PAYLOAD_SDK" submodule update --init --recursive
+          fi
+
+      - name: Validate PS4 SDK layout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f "$PS4_PAYLOAD_SDK/toolchain/orbis.mk" || -f "$PS4_PAYLOAD_SDK/toolchain/ps4.mk" || -f "$PS4_PAYLOAD_SDK/orbis.mk" || -f "$PS4_PAYLOAD_SDK/ps4.mk" || -f "$PS4_PAYLOAD_SDK/libPS4/libPS4.a" ]]; then
+            exit 0
+          fi
+
+          echo "PS4 SDK layout invalid under: $PS4_PAYLOAD_SDK" >&2
+          echo "Expected one of:" >&2
+          echo "  toolchain/orbis.mk | toolchain/ps4.mk | orbis.mk | ps4.mk | libPS4/libPS4.a" >&2
+          echo "Directory listing for diagnosis:" >&2
+          ls -la "$PS4_PAYLOAD_SDK" >&2 || true
+          find "$PS4_PAYLOAD_SDK" -maxdepth 3 -type f \( -name 'orbis.mk' -o -name 'ps4.mk' -o -name 'libPS4.a' \) >&2 || true
+          exit 1
 
       - name: Build payloads
         shell: bash
