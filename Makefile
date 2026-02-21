@@ -50,6 +50,11 @@ PS4_TOOLCHAIN_MK ?= $(firstword $(wildcard \
 ifneq ($(strip $(PS4_TOOLCHAIN_MK)),)
 include $(PS4_TOOLCHAIN_MK)
 PS4_CC := $(CC)
+PS4_COMPAT_HEADER := $(firstword $(wildcard \
+	$(PS4_PAYLOAD_SDK)/ps4.h \
+	$(PS4_PAYLOAD_SDK)/include/ps4.h \
+	$(PS4_PAYLOAD_SDK)/libPS4/include/ps4.h))
+ifneq ($(strip $(PS4_COMPAT_HEADER)),)
 PS4_PAYLOAD_CFLAGS := \
 	-I$(PS4_PAYLOAD_SDK) \
 	-I$(PS4_PAYLOAD_SDK)/include \
@@ -57,6 +62,11 @@ PS4_PAYLOAD_CFLAGS := \
 	-Wall -O2 \
 	-DPS5DRIVE_PS4_BUILD=1 \
 	-DPS5DRIVE_VERSION=\"$(VERSION)\"
+PS4_COMPAT_MODE := enabled
+else
+PS4_PAYLOAD_CFLAGS := -Wall -O2 -DPS5DRIVE_VERSION=\"$(VERSION)\"
+PS4_COMPAT_MODE := disabled
+endif
 PS4_PAYLOAD_LDADD := -lkernel
 PS4_PAYLOAD_LDFLAGS :=
 PS4_BUILD_MODE := toolchain-mk
@@ -84,6 +94,7 @@ PS4_PAYLOAD_LDADD := \
 	$(PS4_LIBPS4_ROOT)/libPS4/crt0.s \
 	$(PS4_LIBPS4_ROOT)/libPS4/libPS4.a
 PS4_BUILD_MODE := libPS4
+PS4_COMPAT_MODE := enabled
 endif
 endif
 
@@ -170,5 +181,7 @@ info:
 	@echo "PS5_TOOLCHAIN_MK=$(PS5_TOOLCHAIN_MK)"
 	@echo "PS4_TOOLCHAIN_MK=$(PS4_TOOLCHAIN_MK)"
 	@echo "PS4_LIBPS4_ROOT=$(PS4_LIBPS4_ROOT)"
+	@echo "PS4_COMPAT_HEADER=$(PS4_COMPAT_HEADER)"
+	@echo "PS4_COMPAT_MODE=$(PS4_COMPAT_MODE)"
 	@echo "PS4_BUILD_MODE=$(PS4_BUILD_MODE)"
 	@echo "HOST_TARGET=$(HOST_TARGET)"

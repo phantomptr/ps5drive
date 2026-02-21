@@ -1,5 +1,13 @@
 #define PS5DRIVE_PS4_COMPAT_IMPL 1
 #include "ps4_compat.h"
+
+#if !defined(PS5DRIVE_PS4_BUILD)
+
+void ps4_sdk_init(void) {
+}
+
+#else
+
 #include "config.h"
 
 extern int libc;
@@ -305,3 +313,5 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
     if (!g_vsnprintf_fn) return -1;
     return g_vsnprintf_fn(str, size, format, ap);
 }
+
+#endif

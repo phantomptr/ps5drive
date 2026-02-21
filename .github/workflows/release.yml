@@ -84,25 +84,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          has_build_layout=0
           if [[ -f "$PS4_PAYLOAD_SDK/toolchain/orbis.mk" || -f "$PS4_PAYLOAD_SDK/toolchain/ps4.mk" || -f "$PS4_PAYLOAD_SDK/orbis.mk" || -f "$PS4_PAYLOAD_SDK/ps4.mk" || -f "$PS4_PAYLOAD_SDK/libPS4/libPS4.a" ]]; then
-            has_build_layout=1
-          fi
-
-          has_ps4_header=0
-          if [[ -f "$PS4_PAYLOAD_SDK/ps4.h" || -f "$PS4_PAYLOAD_SDK/include/ps4.h" || -f "$PS4_PAYLOAD_SDK/libPS4/include/ps4.h" ]]; then
-            has_ps4_header=1
-          fi
-
-          if [[ "$has_build_layout" -eq 1 && "$has_ps4_header" -eq 1 ]]; then
+            if [[ -f "$PS4_PAYLOAD_SDK/ps4.h" || -f "$PS4_PAYLOAD_SDK/include/ps4.h" || -f "$PS4_PAYLOAD_SDK/libPS4/include/ps4.h" ]]; then
+              echo "PS4 SDK compatibility header found (ps4.h)."
+            else
+              echo "PS4 SDK compatibility header not found (ps4.h)." >&2
+              echo "Proceeding with fallback PS4 build mode (no PS5DRIVE_PS4_BUILD wrappers)." >&2
+            fi
             exit 0
           fi
 
           echo "PS4 SDK layout invalid under: $PS4_PAYLOAD_SDK" >&2
           echo "Expected one of:" >&2
           echo "  toolchain/orbis.mk | toolchain/ps4.mk | orbis.mk | ps4.mk | libPS4/libPS4.a" >&2
-          echo "And header file in one of:" >&2
-          echo "  ps4.h | include/ps4.h | libPS4/include/ps4.h" >&2
           echo "Directory listing for diagnosis:" >&2
           ls -la "$PS4_PAYLOAD_SDK" >&2 || true
           find "$PS4_PAYLOAD_SDK" -maxdepth 4 -type f \( -name 'orbis.mk' -o -name 'ps4.mk' -o -name 'libPS4.a' -o -name 'ps4.h' \) >&2 || true
