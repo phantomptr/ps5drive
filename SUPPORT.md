@@ -2,7 +2,7 @@
 
 For help, bug reports, feature requests, or community discussion:
 
-- Discord: `https://discord.com/invite/fzK3xddtrM`
+- Discord (UndefinedLab): `https://discord.gg/fzK3xddtrM`
 - GitHub Issues: `https://github.com/phantomptr/ps5drive/issues`
 - Donation (Ko-fi): `https://ko-fi.com/B0B81S0WUA`
 

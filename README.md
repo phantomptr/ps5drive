@@ -129,4 +129,4 @@ Created by **PhantomPtr**.
 If you find this tool useful, consider buying me a coffee.
 
 - Ko-fi: `https://ko-fi.com/B0B81S0WUA`
-- Discord server: `https://discord.gg/fzK3xddtrM`
+- Discord server, UndefinedLab: `https://discord.gg/fzK3xddtrM`
